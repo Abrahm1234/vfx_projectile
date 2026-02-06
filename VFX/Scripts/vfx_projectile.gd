@@ -17,6 +17,30 @@ class_name VFXProjectile
 @export var rings_local_offset: Vector3 = Vector3.ZERO
 @export var rings_face_camera: bool = true
 
+# -------------------- Color Schemes --------------------
+@export_group("Color Schemes")
+@export var use_color_schemes: bool = true
+
+@export_enum("Random", "Monochromatic", "Analogous", "Complementary", "Triad", "Split-Complementary", "Tetradic")
+var color_scheme: int = 0
+
+# 12 bins around the hue wheel (R,O,Y,Chartreuse,G,Cyan,Azure,Blue,Violet,Magenta,Rose,...).
+# Higher weight = that bin is chosen more often as the "base" hue.
+@export var spectrum_bin_weights: PackedFloat32Array = PackedFloat32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+
+# If true, sparks will color-shift over lifetime through the full spectrum using hard "threshold" steps.
+@export var sparks_use_full_spectrum_steps: bool = true
+
+# Cached per-apply component colors (stable until _apply_all() runs again)
+var _col_head_base: Color
+var _col_head_core: Color
+var _col_core: Color
+var _col_trail_base: Color
+var _col_trail_core: Color
+var _col_rings: Color
+var _col_sparks: Color
+var _sparks_ramp_tex: GradientTexture1D
+
 # -------------------- Preset --------------------
 @export var preset: VFXPreset:
 	set(v):
@@ -229,6 +253,28 @@ void fragment(){
 }
 """
 
+const _SH_SPARK_TRAIL := """
+shader_type spatial;
+render_mode unshaded, cull_disabled, depth_draw_never, blend_add;
+
+uniform sampler2D noise_tex : source_color;
+uniform float emissive = 2.0;
+uniform vec2 uv_scroll = vec2(1.8, 0.0);
+
+void fragment(){
+	// Assumes UV.y runs along the trail length (0=head, 1=tail). If inverted, swap to UV.y.
+	float t = 1.0 - UV.y;
+
+	float n = texture(noise_tex, fract(UV * 2.2 + TIME * uv_scroll)).r;
+	float a = (t * t) * (0.35 + 0.65 * n);
+
+	vec3 col = COLOR.rgb; // uses particle color ramp
+	ALBEDO = col;
+	EMISSION = col * emissive * a;
+	ALPHA = a;
+}
+"""
+
 const _SH_RING := """
 shader_type spatial;
 render_mode unshaded, cull_disabled, depth_draw_never, blend_add;
@@ -298,6 +344,9 @@ func _apply_all() -> void:
 	_ensure_hierarchy()
 	_noise_tex = _get_or_build_noise_texture()
 
+	if use_color_schemes:
+		_assign_scheme_colors()
+
 	_apply_head()
 	_apply_core()
 	_apply_trail()
@@ -308,8 +357,8 @@ func _apply_all() -> void:
 
 # -------------------- Head --------------------
 func _apply_head() -> void:
-	var base_col: Color = _pick_color(0.55)
-	var core_col: Color = _pick_color(0.85)
+	var base_col: Color = _col_head_base if use_color_schemes else _pick_color(0.55)
+	var core_col: Color = _col_head_core if use_color_schemes else _pick_color(0.85)
 
 	var sh := Shader.new()
 	sh.code = _SH_HEAD
@@ -363,9 +412,13 @@ func _apply_core() -> void:
 	var s_factor: float = target_r / base_r
 	_core.scale = Vector3.ONE * s_factor
 
-	var col: Color = _preset.core_color_override
-	if _preset.core_use_palette_color:
-		col = _pick_color(0.9)
+	var col: Color
+	if use_color_schemes:
+		col = _col_core
+	else:
+		col = _preset.core_color_override
+		if _preset.core_use_palette_color:
+			col = _pick_color(0.9)
 
 	var sh := Shader.new()
 	sh.code = _SH_CORE
@@ -386,8 +439,8 @@ func _apply_core() -> void:
 
 # -------------------- Trail + Glow --------------------
 func _apply_trail() -> void:
-	var base_col: Color = _pick_color(0.55)
-	var core_col: Color = _pick_color(0.85)
+	var base_col: Color = _col_trail_base if use_color_schemes else _pick_color(0.55)
+	var core_col: Color = _col_trail_core if use_color_schemes else _pick_color(0.85)
 
 	var sh := Shader.new()
 	sh.code = _SH_TRAIL
@@ -444,7 +497,7 @@ func _apply_rings() -> void:
 	_ring_b.mesh = quad.duplicate(true)
 	_ring_c.mesh = quad.duplicate(true)
 
-	var ring_col: Color = _pick_color(0.65)
+	var ring_col: Color = _col_rings if use_color_schemes else _pick_color(0.65)
 
 	var sh := Shader.new()
 	sh.code = _SH_RING
@@ -488,9 +541,14 @@ func _face_rings_to_camera() -> void:
 func _spin_rings(delta: float) -> void:
 	if _rings_root == null or not _rings_root.visible:
 		return
-	_ring_a.rotate_object_local(Vector3(0, 0, 1), 0.6 * delta)
-	_ring_b.rotate_object_local(Vector3(0, 0, 1), -0.45 * delta)
-	_ring_c.rotate_object_local(Vector3(0, 0, 1), 0.25 * delta)
+	if is_instance_valid(_ring_a):
+		_ring_a.rotate_object_local(Vector3(0, 0, 1), 0.6 * delta)
+
+	if is_instance_valid(_ring_b):
+		_ring_b.rotate_object_local(Vector3(0, 0, 1), -0.45 * delta)
+
+	if is_instance_valid(_ring_c):
+		_ring_c.rotate_object_local(Vector3(0, 0, 1), 0.25 * delta)
 
 # -------------------- Sparks (ring emission) --------------------
 func _apply_sparks_ring() -> void:
@@ -516,12 +574,15 @@ func _apply_sparks_ring() -> void:
 	pm.scale_max = _preset.spark_size_max
 	pm.spread = rad_to_deg(_preset.spark_spread)
 
-	if _preset.use_gradient_palette and _preset.gradient != null:
-		var ramp := GradientTexture1D.new()
-		ramp.gradient = _preset.gradient
-		pm.color_ramp = ramp
+	if use_color_schemes and _sparks_ramp_tex != null:
+		pm.color_ramp = _sparks_ramp_tex
 	else:
-		pm.color = _pick_color(0.65)
+		if _preset.use_gradient_palette and _preset.gradient != null:
+			var ramp := GradientTexture1D.new()
+			ramp.gradient = _preset.gradient
+			pm.color_ramp = ramp
+		else:
+			pm.color = _col_sparks if use_color_schemes else _pick_color(0.65)
 
 	_sparks.process_material = pm
 	_sparks.one_shot = false
@@ -547,7 +608,33 @@ func _apply_sparks_ring() -> void:
 	quad.material = _spark_mat
 	_sparks.draw_pass_1 = quad
 
+	# --- Enable per-particle trails (Godot-generated ribbons) ---
+	_set_prop_if_exists(_sparks, &"trail_enabled", true)
+
+	# Keep this shorter than particle lifetime for “streaks”
+	_set_prop_if_exists(_sparks, &"trail_lifetime", min(_preset.spark_lifetime, 0.35))
+
+	# More sections = smoother curves, more cost
+	_set_prop_if_exists(_sparks, &"trail_sections", 16)
+
+	# Optional: a dedicated trail material for wispy fade/noise
+	var trail_sh := Shader.new()
+	trail_sh.code = _SH_SPARK_TRAIL
+	var trail_mat := ShaderMaterial.new()
+	trail_mat.shader = trail_sh
+	trail_mat.set_shader_parameter("noise_tex", _noise_tex)
+	trail_mat.set_shader_parameter("emissive", _preset.emiss_energy_sparks)
+	trail_mat.set_shader_parameter("uv_scroll", Vector2(1.8, 0.0))
+
+	_set_prop_if_exists(_sparks, &"trail_material", trail_mat)
+
 # -------------------- Helpers --------------------
+func _set_prop_if_exists(o: Object, prop: StringName, value) -> void:
+	for p in o.get_property_list():
+		if p.name == prop:
+			o.set(prop, value)
+			return
+
 func apply_seed(seed_value: int) -> void:
 	_seed_value = seed_value
 	_apply_all()
@@ -563,6 +650,175 @@ func _head_center_local() -> Vector3:
 		var aabb: AABB = _head.mesh.get_aabb()
 		return aabb.position + aabb.size * 0.5
 	return Vector3.ZERO
+
+func _wrap12(i: int) -> int:
+	var r := i % 12
+	return r + 12 if r < 0 else r
+
+func _pick_weighted_index_12(rng: RandomNumberGenerator, weights: PackedFloat32Array) -> int:
+	var w := weights
+	if w.size() != 12:
+		w = PackedFloat32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+
+	var total := 0.0
+	for i in range(12):
+		total += maxf(0.0, float(w[i]))
+	if total <= 0.0:
+		return rng.randi_range(0, 11)
+
+	var r := rng.randf() * total
+	var acc := 0.0
+	for i in range(12):
+		acc += maxf(0.0, float(w[i]))
+		if r <= acc:
+			return i
+	return 11
+
+func _hue_from_bin(bin_idx: int) -> float:
+	# 12-step spectrum. bin 0 = red (0 deg), 1 = orange (30 deg), ... 11 = rose (330 deg)
+	return float(_wrap12(bin_idx)) / 12.0
+
+func _scheme_bins(scheme: int, base_bin: int) -> PackedInt32Array:
+	# Returns hue-bin indices for each scheme (all mod 12)
+	match scheme:
+		1: # Monochromatic
+			return PackedInt32Array([_wrap12(base_bin)])
+		2: # Analogous (adjacent)
+			return PackedInt32Array([_wrap12(base_bin - 1), _wrap12(base_bin), _wrap12(base_bin + 1)])
+		3: # Complementary (opposite)
+			return PackedInt32Array([_wrap12(base_bin), _wrap12(base_bin + 6)])
+		4: # Triad (120 degrees)
+			return PackedInt32Array([_wrap12(base_bin), _wrap12(base_bin + 4), _wrap12(base_bin + 8)])
+		5: # Split-Complementary (150/210 degrees)
+			return PackedInt32Array([_wrap12(base_bin), _wrap12(base_bin + 5), _wrap12(base_bin + 7)])
+		6: # Tetradic (90 degree steps)
+			return PackedInt32Array([_wrap12(base_bin), _wrap12(base_bin + 3), _wrap12(base_bin + 6), _wrap12(base_bin + 9)])
+		_: # Random (handled elsewhere)
+			return PackedInt32Array([_wrap12(base_bin)])
+
+func _hdr_from_hsv(h: float, s: float, v: float, a: float = 1.0) -> Color:
+	# Godot supports HDR colors (v > 1) for bloom/emission
+	return Color.from_hsv(fposmod(h, 1.0), clampf(s, 0.0, 1.0), maxf(0.0, v), a)
+
+func _brighten(c: Color, mul: float) -> Color:
+	return Color(c.r * mul, c.g * mul, c.b * mul, c.a)
+
+func _build_step_gradient(colors: Array[Color], steps: int) -> GradientTexture1D:
+	var g: Gradient = Gradient.new()
+	var n: int = maxi(1, steps)
+	var eps: float = 0.0005
+
+	# Hard-ish steps by duplicating points near boundaries.
+	for i in range(n):
+		var c: Color = colors[i % colors.size()]
+		var t0: float = float(i) / float(n)
+		var t1: float = float(i + 1) / float(n)
+
+		g.add_point(clampf(t0 + eps, 0.0, 1.0), c)
+		g.add_point(clampf(t1 - eps, 0.0, 1.0), c)
+
+	var tex: GradientTexture1D = GradientTexture1D.new()
+	tex.gradient = g
+	tex.width = 256
+	return tex
+
+func _make_palette_for_scheme(scheme: int, sub_seed: int, s: float, v: float) -> Array[Color]:
+	var r := RandomNumberGenerator.new()
+	r.seed = sub_seed
+
+	var base_bin := _pick_weighted_index_12(r, spectrum_bin_weights)
+	var bins := _scheme_bins(scheme, base_bin)
+
+	var pal: Array[Color] = []
+	for b in bins:
+		pal.append(_hdr_from_hsv(_hue_from_bin(b), s, v, 1.0))
+	return pal
+
+func _pick_from_palette(pal: Array[Color], idx: int, fallback: Color) -> Color:
+	if pal.is_empty():
+		return fallback
+	return pal[clampi(idx, 0, pal.size() - 1)]
+
+func _assign_scheme_colors() -> void:
+	if _preset == null:
+		return
+
+	# --- deterministic base ---
+	var base_seed: int = int(_seed_value) ^ 0x5A17C3
+
+	# Schemes 1..6 (Monochromatic..Tetradic)
+	var all_schemes: Array[int] = [1, 2, 3, 4, 5, 6]
+
+	# Deterministically shuffle so components get different schemes
+	var rng_pick := RandomNumberGenerator.new()
+	rng_pick.seed = base_seed ^ 0xB16B00B5
+
+	for i in range(all_schemes.size() - 1, 0, -1):
+		var j := rng_pick.randi_range(0, i)
+		var tmp := all_schemes[i]
+		all_schemes[i] = all_schemes[j]
+		all_schemes[j] = tmp
+
+	# Map components to schemes (unique per apply)
+	var scheme_head: int = all_schemes[0]
+	var scheme_core: int = all_schemes[1]
+	var scheme_trail: int = all_schemes[2]
+	var scheme_rings: int = all_schemes[3]
+	var scheme_sparks: int = all_schemes[4]
+
+	# --- shared sat/value style, deterministic ---
+	var rng_sv := RandomNumberGenerator.new()
+	rng_sv.seed = base_seed ^ 0xC0FFEE
+	var s := rng_sv.randf_range(_preset.sat_min, _preset.sat_max)
+	var v := rng_sv.randf_range(_preset.val_min, _preset.val_max)
+
+	# --- palettes per component (deterministic sub-seeds) ---
+	var pal_head := _make_palette_for_scheme(scheme_head, base_seed ^ 0x11111111, s, v)
+	var pal_core := _make_palette_for_scheme(scheme_core, base_seed ^ 0x22222222, s, v)
+	var pal_trail := _make_palette_for_scheme(scheme_trail, base_seed ^ 0x33333333, s, v)
+	var pal_rings := _make_palette_for_scheme(scheme_rings, base_seed ^ 0x44444444, s, v)
+	var pal_sparks := _make_palette_for_scheme(scheme_sparks, base_seed ^ 0x55555555, s, v)
+
+	# --- per-component RNGs for picking within each palette ---
+	var r_head := RandomNumberGenerator.new()
+	r_head.seed = base_seed ^ 0xAAAA0001
+	var r_core := RandomNumberGenerator.new()
+	r_core.seed = base_seed ^ 0xAAAA0002
+	var r_trail := RandomNumberGenerator.new()
+	r_trail.seed = base_seed ^ 0xAAAA0003
+	var r_rings := RandomNumberGenerator.new()
+	r_rings.seed = base_seed ^ 0xAAAA0004
+	var r_spk := RandomNumberGenerator.new()
+	r_spk.seed = base_seed ^ 0xAAAA0005
+
+	# Head: base + brighter core (from head palette)
+	_col_head_base = _pick_from_palette(pal_head, 0, _hdr_from_hsv(0.0, s, v, 1.0))
+	var head_core_src := _pick_from_palette(pal_head, min(1, pal_head.size() - 1), _col_head_base)
+	_col_head_core = _brighten(head_core_src, 1.35)
+
+	# Inner core: random pick from core palette
+	var core_idx := r_core.randi_range(0, max(0, pal_core.size() - 1))
+	_col_core = _pick_from_palette(pal_core, core_idx, _col_head_core)
+
+	# Trail: base + core from trail palette
+	_col_trail_base = _pick_from_palette(pal_trail, 0, _hdr_from_hsv(0.08, s, v, 1.0))
+	var trail_core_src := _pick_from_palette(pal_trail, min(1, pal_trail.size() - 1), _col_trail_base)
+	_col_trail_core = _brighten(trail_core_src, 1.25)
+
+	# Rings: prefer last palette entry (often most contrasty)
+	_col_rings = _pick_from_palette(pal_rings, pal_rings.size() - 1, _hdr_from_hsv(0.6, s, v, 1.0))
+
+	# Sparks: random pick from sparks palette
+	var spk_idx := r_spk.randi_range(0, max(0, pal_sparks.size() - 1))
+	_col_sparks = _pick_from_palette(pal_sparks, spk_idx, _hdr_from_hsv(0.33, s, v, 1.0))
+
+	if sparks_use_full_spectrum_steps:
+		var spectrum: Array[Color] = []
+		for i in range(12):
+			spectrum.append(_hdr_from_hsv(_hue_from_bin(i), s, v, 1.0))
+		_sparks_ramp_tex = _build_step_gradient(spectrum, 12)
+	else:
+		_sparks_ramp_tex = _build_step_gradient(pal_sparks, max(2, pal_sparks.size()))
 
 func _pick_color(t: float) -> Color:
 	if _preset.use_gradient_palette and _preset.gradient != null:
