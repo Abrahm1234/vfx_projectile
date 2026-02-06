@@ -45,14 +45,14 @@ class_name VFXPreset
 # Core (internal mesh)
 @export var core_enabled: bool = true
 @export var core_mesh: Mesh
-@export_range(0.05, 1.0, 0.01) var core_scale: float = 0.55
-@export_range(0.0, 1.0, 0.001) var core_distort_amount: float = 0.08
+@export_range(0.05, 1.0, 0.01) var core_scale: float = 0.35
+@export_range(0.0, 1.0, 0.001) var core_distort_amount: float = 1.08
 @export_range(0.0, 20.0, 0.01) var core_distort_speed: float = 4.0
 
 # Rings
 @export var rings_enabled: bool = true
 @export_range(0.01, 5.0, 0.01) var ring_radius_m: float = 0.45
-@export_range(0.001, 2.0, 0.001) var ring_thickness_m: float = 0.06
+@export_range(0.001, 2.0, 0.001) var ring_thickness_m: float = 0.16
 @export_range(0.0, 1.0, 0.001) var ring_pulse_amount: float = 0.08
 @export_range(0.0, 20.0, 0.01) var ring_pulse_speed: float = 3.5
 
