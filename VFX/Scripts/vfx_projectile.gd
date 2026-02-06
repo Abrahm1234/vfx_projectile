@@ -88,17 +88,13 @@ enum ColorScheme {
 
 const _ALL_SCHEMES: Array[int] = [0, 1, 2, 3, 4, 5]
 
-# Deterministic salts (valid hex)
+# Deterministic salts (ALL must be valid hex: 0-9, A-F)
 const _SALT_CORE: int   = 0xC0DEC0DE
 const _SALT_SCHEME: int = 0x51A7C3A1
 const _SALT_HEAD: int   = 0x11EAD001
 const _SALT_TRAIL: int  = 0x7A11F00D
-const _SALT_RINGS: int  = 0xR1N65001 # INVALID in hex; do NOT use
-# Replace invalid literal with valid numeric:
-const _SALT_RINGS_OK: int = 0x716E6501
-const _SALT_SPARKS: int = 0x5PA4B5 # INVALID in hex; do NOT use
-# Replace invalid literal with valid numeric:
-const _SALT_SPARKS_OK: int = 0x5FA4B500
+const _SALT_RINGS: int  = 0x716E6501
+const _SALT_SPARKS: int = 0x5FA4B500
 
 # -----------------------------
 # Godot lifecycle
@@ -310,7 +306,7 @@ func _apply_sparks() -> void:
 		var gfull: GradientTexture1D = _build_step_gradient(_palette_full_spectrum(), 12)
 		_set_prop(pm, "color_ramp", gfull)
 	else:
-		var g: GradientTexture1D = _build_step_gradient(_palette_for_scheme(int(ColorScheme.ANALOGOUS), _col_core, _mix_seed(_seed_value, _SALT_SPARKS_OK)), 6)
+		var g: GradientTexture1D = _build_step_gradient(_palette_for_scheme(int(ColorScheme.ANALOGOUS), _col_core, _mix_seed(_seed_value, _SALT_SPARKS)), 6)
 		_set_prop(pm, "color_ramp", g)
 
 	# Draw pass mesh/material (billboard + emission)
@@ -367,14 +363,14 @@ func _assign_scheme_colors() -> void:
 
 	var scheme_head: int = _resolve_component_scheme(head_scheme_override, global_scheme, available, _SALT_HEAD)
 	var scheme_trail: int = _resolve_component_scheme(trail_scheme_override, global_scheme, available, _SALT_TRAIL)
-	var scheme_rings: int = _resolve_component_scheme(rings_scheme_override, global_scheme, available, _SALT_RINGS_OK)
-	var scheme_sparks: int = _resolve_component_scheme(sparks_scheme_override, global_scheme, available, _SALT_SPARKS_OK)
+	var scheme_rings: int = _resolve_component_scheme(rings_scheme_override, global_scheme, available, _SALT_RINGS)
+	var scheme_sparks: int = _resolve_component_scheme(sparks_scheme_override, global_scheme, available, _SALT_SPARKS)
 
 	# Build per-component palette anchored to core hue and pick one color deterministically
 	_col_head = _pick_from_palette(_palette_for_scheme(scheme_head, _col_core, _mix_seed(_seed_value, _SALT_HEAD)), _mix_seed(_seed_value, _SALT_HEAD ^ 0x1))
 	_col_trail = _pick_from_palette(_palette_for_scheme(scheme_trail, _col_core, _mix_seed(_seed_value, _SALT_TRAIL)), _mix_seed(_seed_value, _SALT_TRAIL ^ 0x1))
-	_col_rings = _pick_from_palette(_palette_for_scheme(scheme_rings, _col_core, _mix_seed(_seed_value, _SALT_RINGS_OK)), _mix_seed(_seed_value, _SALT_RINGS_OK ^ 0x1))
-	_col_sparks = _pick_from_palette(_palette_for_scheme(scheme_sparks, _col_core, _mix_seed(_seed_value, _SALT_SPARKS_OK)), _mix_seed(_seed_value, _SALT_SPARKS_OK ^ 0x1))
+	_col_rings = _pick_from_palette(_palette_for_scheme(scheme_rings, _col_core, _mix_seed(_seed_value, _SALT_RINGS)), _mix_seed(_seed_value, _SALT_RINGS ^ 0x1))
+	_col_sparks = _pick_from_palette(_palette_for_scheme(scheme_sparks, _col_core, _mix_seed(_seed_value, _SALT_SPARKS)), _mix_seed(_seed_value, _SALT_SPARKS ^ 0x1))
 
 func _assign_random_colors() -> void:
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
