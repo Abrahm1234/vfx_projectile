@@ -722,6 +722,23 @@ func _build_step_gradient(colors: Array[Color], steps: int) -> GradientTexture1D
 	tex.width = 256
 	return tex
 
+func _make_palette_for_scheme(scheme: int, sub_seed: int, s: float, v: float) -> Array[Color]:
+	var r := RandomNumberGenerator.new()
+	r.seed = sub_seed
+
+	var base_bin := _pick_weighted_index_12(r, spectrum_bin_weights)
+	var bins := _scheme_bins(scheme, base_bin)
+
+	var pal: Array[Color] = []
+	for b in bins:
+		pal.append(_hdr_from_hsv(_hue_from_bin(b), s, v, 1.0))
+	return pal
+
+func _pick_from_palette(pal: Array[Color], idx: int, fallback: Color) -> Color:
+	if pal.is_empty():
+		return fallback
+	return pal[clamp(idx, 0, pal.size() - 1)]
+
 func _assign_scheme_colors() -> void:
 	if _preset == null:
 		return
@@ -729,10 +746,10 @@ func _assign_scheme_colors() -> void:
 	# --- deterministic base ---
 	var base_seed: int = int(_seed_value) ^ 0x5A17C3
 
-	# Schemes 1..6 (Monochromatic..Tetradic). 0 is Random, handled by choosing a random in-range.
+	# Schemes 1..6 (Monochromatic..Tetradic)
 	var all_schemes: Array[int] = [1, 2, 3, 4, 5, 6]
 
-	# Deterministically shuffle scheme order so each component gets a different scheme.
+	# Deterministically shuffle so components get different schemes
 	var rng_pick := RandomNumberGenerator.new()
 	rng_pick.seed = base_seed ^ 0xB16B00B5
 
@@ -755,33 +772,14 @@ func _assign_scheme_colors() -> void:
 	var s := rng_sv.randf_range(_preset.sat_min, _preset.sat_max)
 	var v := rng_sv.randf_range(_preset.val_min, _preset.val_max)
 
-	# --- helpers (local closures) ---
-	func make_palette_for(scheme: int, sub_seed: int) -> Array[Color]:
-		var r := RandomNumberGenerator.new()
-		r.seed = sub_seed
+	# --- palettes per component (deterministic sub-seeds) ---
+	var pal_head := _make_palette_for_scheme(scheme_head, base_seed ^ 0x11111111, s, v)
+	var pal_core := _make_palette_for_scheme(scheme_core, base_seed ^ 0x22222222, s, v)
+	var pal_trail := _make_palette_for_scheme(scheme_trail, base_seed ^ 0x33333333, s, v)
+	var pal_rings := _make_palette_for_scheme(scheme_rings, base_seed ^ 0x44444444, s, v)
+	var pal_sparks := _make_palette_for_scheme(scheme_sparks, base_seed ^ 0x55555555, s, v)
 
-		var base_bin := _pick_weighted_index_12(r, spectrum_bin_weights)
-		var bins := _scheme_bins(scheme, base_bin)
-
-		var pal: Array[Color] = []
-		for b in bins:
-			pal.append(_hdr_from_hsv(_hue_from_bin(b), s, v, 1.0))
-		return pal
-
-	func pick_from(pal: Array[Color], r: RandomNumberGenerator, idx: int, fallback: Color) -> Color:
-		if pal.is_empty():
-			return fallback
-		var i := clamp(idx, 0, pal.size() - 1)
-		return pal[i]
-
-	# --- build palettes per component with deterministic sub-seeds ---
-	var pal_head := make_palette_for(scheme_head, base_seed ^ 0x11111111)
-	var pal_core := make_palette_for(scheme_core, base_seed ^ 0x22222222)
-	var pal_trail := make_palette_for(scheme_trail, base_seed ^ 0x33333333)
-	var pal_rings := make_palette_for(scheme_rings, base_seed ^ 0x44444444)
-	var pal_sparks := make_palette_for(scheme_sparks, base_seed ^ 0x55555555)
-
-	# --- choose actual colors (also deterministic) ---
+	# --- per-component RNGs for picking within each palette ---
 	var r_head := RandomNumberGenerator.new()
 	r_head.seed = base_seed ^ 0xAAAA0001
 	var r_core := RandomNumberGenerator.new()
@@ -793,23 +791,26 @@ func _assign_scheme_colors() -> void:
 	var r_spk := RandomNumberGenerator.new()
 	r_spk.seed = base_seed ^ 0xAAAA0005
 
-	# Head: base + brighter core from its own palette
-	_col_head_base = pick_from(pal_head, r_head, 0, _hdr_from_hsv(0.0, s, v, 1.0))
-	var head_core_src := pick_from(pal_head, r_head, min(1, pal_head.size() - 1), _col_head_base)
+	# Head: base + brighter core (from head palette)
+	_col_head_base = _pick_from_palette(pal_head, 0, _hdr_from_hsv(0.0, s, v, 1.0))
+	var head_core_src := _pick_from_palette(pal_head, min(1, pal_head.size() - 1), _col_head_base)
 	_col_head_core = _brighten(head_core_src, 1.35)
 
-	# Inner core: single color from its own palette
-	_col_core = pick_from(pal_core, r_core, r_core.randi_range(0, max(0, pal_core.size() - 1)), _col_head_core)
+	# Inner core: random pick from core palette
+	var core_idx := r_core.randi_range(0, max(0, pal_core.size() - 1))
+	_col_core = _pick_from_palette(pal_core, core_idx, _col_head_core)
 
-	# Trail: base + core from its own palette
-	_col_trail_base = pick_from(pal_trail, r_trail, 0, _hdr_from_hsv(0.08, s, v, 1.0))
-	_col_trail_core = _brighten(pick_from(pal_trail, r_trail, min(1, pal_trail.size() - 1), _col_trail_base), 1.25)
+	# Trail: base + core from trail palette
+	_col_trail_base = _pick_from_palette(pal_trail, 0, _hdr_from_hsv(0.08, s, v, 1.0))
+	var trail_core_src := _pick_from_palette(pal_trail, min(1, pal_trail.size() - 1), _col_trail_base)
+	_col_trail_core = _brighten(trail_core_src, 1.25)
 
-	# Rings: prefer a contrasting pick within its palette (last color if possible)
-	_col_rings = pick_from(pal_rings, r_rings, pal_rings.size() - 1, _hdr_from_hsv(0.6, s, v, 1.0))
+	# Rings: prefer last palette entry (often most contrasty)
+	_col_rings = _pick_from_palette(pal_rings, pal_rings.size() - 1, _hdr_from_hsv(0.6, s, v, 1.0))
 
-	# Sparks: color from sparks palette (random pick), plus optional full-spectrum step ramp
-	_col_sparks = pick_from(pal_sparks, r_spk, r_spk.randi_range(0, max(0, pal_sparks.size() - 1)), _hdr_from_hsv(0.33, s, v, 1.0))
+	# Sparks: random pick from sparks palette
+	var spk_idx := r_spk.randi_range(0, max(0, pal_sparks.size() - 1))
+	_col_sparks = _pick_from_palette(pal_sparks, spk_idx, _hdr_from_hsv(0.33, s, v, 1.0))
 
 	if sparks_use_full_spectrum_steps:
 		var spectrum: Array[Color] = []
