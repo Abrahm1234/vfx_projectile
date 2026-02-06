@@ -662,14 +662,14 @@ func _pick_weighted_index_12(rng: RandomNumberGenerator, weights: PackedFloat32A
 
 	var total := 0.0
 	for i in range(12):
-		total += max(0.0, float(w[i]))
+		total += maxf(0.0, float(w[i]))
 	if total <= 0.0:
 		return rng.randi_range(0, 11)
 
 	var r := rng.randf() * total
 	var acc := 0.0
 	for i in range(12):
-		acc += max(0.0, float(w[i]))
+		acc += maxf(0.0, float(w[i]))
 		if r <= acc:
 			return i
 	return 11
@@ -698,26 +698,26 @@ func _scheme_bins(scheme: int, base_bin: int) -> PackedInt32Array:
 
 func _hdr_from_hsv(h: float, s: float, v: float, a: float = 1.0) -> Color:
 	# Godot supports HDR colors (v > 1) for bloom/emission
-	return Color.from_hsv(fposmod(h, 1.0), clamp(s, 0.0, 1.0), max(0.0, v), a)
+	return Color.from_hsv(fposmod(h, 1.0), clampf(s, 0.0, 1.0), maxf(0.0, v), a)
 
 func _brighten(c: Color, mul: float) -> Color:
 	return Color(c.r * mul, c.g * mul, c.b * mul, c.a)
 
 func _build_step_gradient(colors: Array[Color], steps: int) -> GradientTexture1D:
-	var g := Gradient.new()
-	var n := max(1, steps)
-	var eps := 0.0005
+	var g: Gradient = Gradient.new()
+	var n: int = maxi(1, steps)
+	var eps: float = 0.0005
 
 	# Hard-ish steps by duplicating points near boundaries.
 	for i in range(n):
-		var c := colors[i % colors.size()]
-		var t0 := float(i) / float(n)
-		var t1 := float(i + 1) / float(n)
+		var c: Color = colors[i % colors.size()]
+		var t0: float = float(i) / float(n)
+		var t1: float = float(i + 1) / float(n)
 
-		g.add_point(clamp(t0 + eps, 0.0, 1.0), c)
-		g.add_point(clamp(t1 - eps, 0.0, 1.0), c)
+		g.add_point(clampf(t0 + eps, 0.0, 1.0), c)
+		g.add_point(clampf(t1 - eps, 0.0, 1.0), c)
 
-	var tex := GradientTexture1D.new()
+	var tex: GradientTexture1D = GradientTexture1D.new()
 	tex.gradient = g
 	tex.width = 256
 	return tex
@@ -737,7 +737,7 @@ func _make_palette_for_scheme(scheme: int, sub_seed: int, s: float, v: float) ->
 func _pick_from_palette(pal: Array[Color], idx: int, fallback: Color) -> Color:
 	if pal.is_empty():
 		return fallback
-	return pal[clamp(idx, 0, pal.size() - 1)]
+	return pal[clampi(idx, 0, pal.size() - 1)]
 
 func _assign_scheme_colors() -> void:
 	if _preset == null:
