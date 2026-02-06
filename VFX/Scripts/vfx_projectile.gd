@@ -488,9 +488,14 @@ func _face_rings_to_camera() -> void:
 func _spin_rings(delta: float) -> void:
 	if _rings_root == null or not _rings_root.visible:
 		return
-	_ring_a.rotate_object_local(Vector3(0, 0, 1), 0.6 * delta)
-	_ring_b.rotate_object_local(Vector3(0, 0, 1), -0.45 * delta)
-	_ring_c.rotate_object_local(Vector3(0, 0, 1), 0.25 * delta)
+	if is_instance_valid(_ring_a):
+		_ring_a.rotate_object_local(Vector3(0, 0, 1), 0.6 * delta)
+
+	if is_instance_valid(_ring_b):
+		_ring_b.rotate_object_local(Vector3(0, 0, 1), -0.45 * delta)
+
+	if is_instance_valid(_ring_c):
+		_ring_c.rotate_object_local(Vector3(0, 0, 1), 0.25 * delta)
 
 # -------------------- Sparks (ring emission) --------------------
 func _apply_sparks_ring() -> void:
