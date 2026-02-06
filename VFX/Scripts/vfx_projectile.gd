@@ -436,7 +436,7 @@ func _sync_rings_to_head_center() -> void:
 		var center_local: Vector3 = aabb.position + aabb.size * 0.5
 		pos = _head.global_transform * center_local
 
-	_rings_root.global_position = pos
+	_rings_root.global_transform = Transform3D(Basis.IDENTITY, pos)
 
 func _face_rings_to_camera() -> void:
 	if _rings_root == null or not _rings_root.visible:
