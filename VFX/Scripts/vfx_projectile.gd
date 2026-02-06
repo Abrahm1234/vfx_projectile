@@ -17,6 +17,30 @@ class_name VFXProjectile
 @export var rings_local_offset: Vector3 = Vector3.ZERO
 @export var rings_face_camera: bool = true
 
+# -------------------- Color Schemes --------------------
+@export_group("Color Schemes")
+@export var use_color_schemes: bool = true
+
+@export_enum("Random", "Monochromatic", "Analogous", "Complementary", "Triad", "Split-Complementary", "Tetradic")
+var color_scheme: int = 0
+
+# 12 bins around the hue wheel (R,O,Y,Chartreuse,G,Cyan,Azure,Blue,Violet,Magenta,Rose,...).
+# Higher weight = that bin is chosen more often as the "base" hue.
+@export var spectrum_bin_weights: PackedFloat32Array = PackedFloat32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+
+# If true, sparks will color-shift over lifetime through the full spectrum using hard "threshold" steps.
+@export var sparks_use_full_spectrum_steps: bool = true
+
+# Cached per-apply component colors (stable until _apply_all() runs again)
+var _col_head_base: Color
+var _col_head_core: Color
+var _col_core: Color
+var _col_trail_base: Color
+var _col_trail_core: Color
+var _col_rings: Color
+var _col_sparks: Color
+var _sparks_ramp_tex: GradientTexture1D
+
 # -------------------- Preset --------------------
 @export var preset: VFXPreset:
 	set(v):
@@ -320,6 +344,9 @@ func _apply_all() -> void:
 	_ensure_hierarchy()
 	_noise_tex = _get_or_build_noise_texture()
 
+	if use_color_schemes:
+		_assign_scheme_colors()
+
 	_apply_head()
 	_apply_core()
 	_apply_trail()
@@ -330,8 +357,8 @@ func _apply_all() -> void:
 
 # -------------------- Head --------------------
 func _apply_head() -> void:
-	var base_col: Color = _pick_color(0.55)
-	var core_col: Color = _pick_color(0.85)
+	var base_col: Color = _col_head_base if use_color_schemes else _pick_color(0.55)
+	var core_col: Color = _col_head_core if use_color_schemes else _pick_color(0.85)
 
 	var sh := Shader.new()
 	sh.code = _SH_HEAD
@@ -385,9 +412,13 @@ func _apply_core() -> void:
 	var s_factor: float = target_r / base_r
 	_core.scale = Vector3.ONE * s_factor
 
-	var col: Color = _preset.core_color_override
-	if _preset.core_use_palette_color:
-		col = _pick_color(0.9)
+	var col: Color
+	if use_color_schemes:
+		col = _col_core
+	else:
+		col = _preset.core_color_override
+		if _preset.core_use_palette_color:
+			col = _pick_color(0.9)
 
 	var sh := Shader.new()
 	sh.code = _SH_CORE
@@ -408,8 +439,8 @@ func _apply_core() -> void:
 
 # -------------------- Trail + Glow --------------------
 func _apply_trail() -> void:
-	var base_col: Color = _pick_color(0.55)
-	var core_col: Color = _pick_color(0.85)
+	var base_col: Color = _col_trail_base if use_color_schemes else _pick_color(0.55)
+	var core_col: Color = _col_trail_core if use_color_schemes else _pick_color(0.85)
 
 	var sh := Shader.new()
 	sh.code = _SH_TRAIL
@@ -466,7 +497,7 @@ func _apply_rings() -> void:
 	_ring_b.mesh = quad.duplicate(true)
 	_ring_c.mesh = quad.duplicate(true)
 
-	var ring_col: Color = _pick_color(0.65)
+	var ring_col: Color = _col_rings if use_color_schemes else _pick_color(0.65)
 
 	var sh := Shader.new()
 	sh.code = _SH_RING
@@ -543,12 +574,15 @@ func _apply_sparks_ring() -> void:
 	pm.scale_max = _preset.spark_size_max
 	pm.spread = rad_to_deg(_preset.spark_spread)
 
-	if _preset.use_gradient_palette and _preset.gradient != null:
-		var ramp := GradientTexture1D.new()
-		ramp.gradient = _preset.gradient
-		pm.color_ramp = ramp
+	if use_color_schemes and _sparks_ramp_tex != null:
+		pm.color_ramp = _sparks_ramp_tex
 	else:
-		pm.color = _pick_color(0.65)
+		if _preset.use_gradient_palette and _preset.gradient != null:
+			var ramp := GradientTexture1D.new()
+			ramp.gradient = _preset.gradient
+			pm.color_ramp = ramp
+		else:
+			pm.color = _col_sparks if use_color_schemes else _pick_color(0.65)
 
 	_sparks.process_material = pm
 	_sparks.one_shot = false
@@ -616,6 +650,124 @@ func _head_center_local() -> Vector3:
 		var aabb: AABB = _head.mesh.get_aabb()
 		return aabb.position + aabb.size * 0.5
 	return Vector3.ZERO
+
+func _wrap12(i: int) -> int:
+	var r := i % 12
+	return r + 12 if r < 0 else r
+
+func _pick_weighted_index_12(rng: RandomNumberGenerator, weights: PackedFloat32Array) -> int:
+	var w := weights
+	if w.size() != 12:
+		w = PackedFloat32Array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+
+	var total := 0.0
+	for i in range(12):
+		total += max(0.0, float(w[i]))
+	if total <= 0.0:
+		return rng.randi_range(0, 11)
+
+	var r := rng.randf() * total
+	var acc := 0.0
+	for i in range(12):
+		acc += max(0.0, float(w[i]))
+		if r <= acc:
+			return i
+	return 11
+
+func _hue_from_bin(bin_idx: int) -> float:
+	# 12-step spectrum. bin 0 = red (0 deg), 1 = orange (30 deg), ... 11 = rose (330 deg)
+	return float(_wrap12(bin_idx)) / 12.0
+
+func _scheme_bins(scheme: int, base_bin: int) -> PackedInt32Array:
+	# Returns hue-bin indices for each scheme (all mod 12)
+	match scheme:
+		1: # Monochromatic
+			return PackedInt32Array([_wrap12(base_bin)])
+		2: # Analogous (adjacent)
+			return PackedInt32Array([_wrap12(base_bin - 1), _wrap12(base_bin), _wrap12(base_bin + 1)])
+		3: # Complementary (opposite)
+			return PackedInt32Array([_wrap12(base_bin), _wrap12(base_bin + 6)])
+		4: # Triad (120 degrees)
+			return PackedInt32Array([_wrap12(base_bin), _wrap12(base_bin + 4), _wrap12(base_bin + 8)])
+		5: # Split-Complementary (150/210 degrees)
+			return PackedInt32Array([_wrap12(base_bin), _wrap12(base_bin + 5), _wrap12(base_bin + 7)])
+		6: # Tetradic (90 degree steps)
+			return PackedInt32Array([_wrap12(base_bin), _wrap12(base_bin + 3), _wrap12(base_bin + 6), _wrap12(base_bin + 9)])
+		_: # Random (handled elsewhere)
+			return PackedInt32Array([_wrap12(base_bin)])
+
+func _hdr_from_hsv(h: float, s: float, v: float, a: float = 1.0) -> Color:
+	# Godot supports HDR colors (v > 1) for bloom/emission
+	return Color.from_hsv(fposmod(h, 1.0), clamp(s, 0.0, 1.0), max(0.0, v), a)
+
+func _brighten(c: Color, mul: float) -> Color:
+	return Color(c.r * mul, c.g * mul, c.b * mul, c.a)
+
+func _build_step_gradient(colors: Array[Color], steps: int) -> GradientTexture1D:
+	var g := Gradient.new()
+	var n := max(1, steps)
+	var eps := 0.0005
+
+	# Hard-ish steps by duplicating points near boundaries.
+	for i in range(n):
+		var c := colors[i % colors.size()]
+		var t0 := float(i) / float(n)
+		var t1 := float(i + 1) / float(n)
+
+		g.add_point(clamp(t0 + eps, 0.0, 1.0), c)
+		g.add_point(clamp(t1 - eps, 0.0, 1.0), c)
+
+	var tex := GradientTexture1D.new()
+	tex.gradient = g
+	tex.width = 256
+	return tex
+
+func _assign_scheme_colors() -> void:
+	if _preset == null:
+		return
+
+	var rng := RandomNumberGenerator.new()
+	# Stable per apply
+	rng.seed = int(_seed_value) ^ 0x5A17C3
+
+	# Resolve scheme
+	var scheme := color_scheme
+	if scheme == 0:
+		scheme = rng.randi_range(1, 6)
+
+	# Choose a base bin using weights (this gives you the “threshold” bins: red/orange/yellow/etc)
+	var base_bin := _pick_weighted_index_12(rng, spectrum_bin_weights)
+	var bins := _scheme_bins(scheme, base_bin)
+
+	# Use your preset sat/val ranges for style consistency
+	var s := rng.randf_range(_preset.sat_min, _preset.sat_max)
+	var v := rng.randf_range(_preset.val_min, _preset.val_max)
+
+	# Build palette colors from bins
+	var pal: Array[Color] = []
+	for b in bins:
+		pal.append(_hdr_from_hsv(_hue_from_bin(b), s, v, 1.0))
+
+	# Assign distinct colors to components by cycling the palette
+	_col_head_base = pal[0]
+	_col_head_core = _brighten(pal[min(1, pal.size() - 1)], 1.35)
+
+	_col_core = pal[min(1, pal.size() - 1)]
+	_col_trail_base = pal[0]
+	_col_trail_core = pal[min(1, pal.size() - 1)]
+
+	_col_rings = pal[pal.size() - 1]
+	_col_sparks = pal[rng.randi_range(0, pal.size() - 1)]
+
+	# Spark ramp:
+	# If enabled, do full 12-step spectrum across lifetime (matches your “red threshold then orange…” request).
+	if sparks_use_full_spectrum_steps:
+		var spectrum: Array[Color] = []
+		for i in range(12):
+			spectrum.append(_hdr_from_hsv(_hue_from_bin(i), s, v, 1.0))
+		_sparks_ramp_tex = _build_step_gradient(spectrum, 12)
+	else:
+		_sparks_ramp_tex = _build_step_gradient(pal, max(2, pal.size()))
 
 func _pick_color(t: float) -> Color:
 	if _preset.use_gradient_palette and _preset.gradient != null:
