@@ -229,6 +229,28 @@ void fragment(){
 }
 """
 
+const _SH_SPARK_TRAIL := """
+shader_type spatial;
+render_mode unshaded, cull_disabled, depth_draw_never, blend_add;
+
+uniform sampler2D noise_tex : source_color;
+uniform float emissive = 2.0;
+uniform vec2 uv_scroll = vec2(1.8, 0.0);
+
+void fragment(){
+	// Assumes UV.y runs along the trail length (0=head, 1=tail). If inverted, swap to UV.y.
+	float t = 1.0 - UV.y;
+
+	float n = texture(noise_tex, fract(UV * 2.2 + TIME * uv_scroll)).r;
+	float a = (t * t) * (0.35 + 0.65 * n);
+
+	vec3 col = COLOR.rgb; // uses particle color ramp
+	ALBEDO = col;
+	EMISSION = col * emissive * a;
+	ALPHA = a;
+}
+"""
+
 const _SH_RING := """
 shader_type spatial;
 render_mode unshaded, cull_disabled, depth_draw_never, blend_add;
@@ -552,7 +574,33 @@ func _apply_sparks_ring() -> void:
 	quad.material = _spark_mat
 	_sparks.draw_pass_1 = quad
 
+	# --- Enable per-particle trails (Godot-generated ribbons) ---
+	_set_prop_if_exists(_sparks, &"trail_enabled", true)
+
+	# Keep this shorter than particle lifetime for “streaks”
+	_set_prop_if_exists(_sparks, &"trail_lifetime", min(_preset.spark_lifetime, 0.35))
+
+	# More sections = smoother curves, more cost
+	_set_prop_if_exists(_sparks, &"trail_sections", 16)
+
+	# Optional: a dedicated trail material for wispy fade/noise
+	var trail_sh := Shader.new()
+	trail_sh.code = _SH_SPARK_TRAIL
+	var trail_mat := ShaderMaterial.new()
+	trail_mat.shader = trail_sh
+	trail_mat.set_shader_parameter("noise_tex", _noise_tex)
+	trail_mat.set_shader_parameter("emissive", _preset.emiss_energy_sparks)
+	trail_mat.set_shader_parameter("uv_scroll", Vector2(1.8, 0.0))
+
+	_set_prop_if_exists(_sparks, &"trail_material", trail_mat)
+
 # -------------------- Helpers --------------------
+func _set_prop_if_exists(o: Object, prop: StringName, value) -> void:
+	for p in o.get_property_list():
+		if p.name == prop:
+			o.set(prop, value)
+			return
+
 func apply_seed(seed_value: int) -> void:
 	_seed_value = seed_value
 	_apply_all()
