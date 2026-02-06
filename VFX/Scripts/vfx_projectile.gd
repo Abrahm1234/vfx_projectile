@@ -313,10 +313,9 @@ func _apply_sparks() -> void:
 	pm.emission_ring_inner_radius = 0.0
 	pm.emission_ring_axis = Vector3.FORWARD
 
-	pm.amount = _p_int("sparks_amount", 140)
-
-	pm.lifetime = _p_float("sparks_lifetime", 0.75)
-	pm.explosiveness = _p_float("sparks_explosiveness", 0.15)
+	_sparks.amount = _p_int("sparks_amount", 140)
+	_sparks.lifetime = _p_float("sparks_lifetime", 0.75)
+	_sparks.explosiveness = _p_float("sparks_explosiveness", 0.15)
 	pm.direction = Vector3.BACK
 	pm.spread = _p_float("sparks_direction_spread", 14.0)
 	pm.initial_velocity_min = 0.0
