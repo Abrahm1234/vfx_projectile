@@ -67,6 +67,11 @@ var _col_trail: Color = Color.WHITE
 var _col_rings: Color = Color.WHITE
 var _col_sparks: Color = Color.WHITE
 
+var _scheme_head: int = 1
+var _scheme_trail: int = 1
+var _scheme_rings: int = 1
+var _scheme_sparks: int = 1
+
 # Cached materials
 var _mat_energy_core: ShaderMaterial
 var _mat_energy_inner: ShaderMaterial
@@ -88,7 +93,7 @@ enum ColorScheme {
 
 const _ALL_SCHEMES: Array[int] = [0, 1, 2, 3, 4, 5]
 
-# Deterministic salts (ALL must be valid hex: 0-9, A-F)
+# Deterministic salts (valid hex)
 const _SALT_CORE: int   = 0xC0DEC0DE
 const _SALT_SCHEME: int = 0x51A7C3A1
 const _SALT_HEAD: int   = 0x11EAD001
@@ -306,7 +311,10 @@ func _apply_sparks() -> void:
 		var gfull: GradientTexture1D = _build_step_gradient(_palette_full_spectrum(), 12)
 		_set_prop(pm, "color_ramp", gfull)
 	else:
-		var g: GradientTexture1D = _build_step_gradient(_palette_for_scheme(int(ColorScheme.ANALOGOUS), _col_core, _mix_seed(_seed_value, _SALT_SPARKS)), 6)
+		var g: GradientTexture1D = _build_step_gradient(
+			_palette_for_scheme(_scheme_sparks, _col_core, _mix_seed(_seed_value, _SALT_SPARKS)),
+			6
+		)
 		_set_prop(pm, "color_ramp", g)
 
 	# Draw pass mesh/material (billboard + emission)
@@ -337,18 +345,11 @@ func _assign_scheme_colors() -> void:
 		_assign_random_colors()
 		return
 
-	# -------------------------
-	# Core = anchor (full spectrum)
-	# -------------------------
+	# Core is the anchor (full spectrum via hue bin + weights)
 	var rng_core: RandomNumberGenerator = RandomNumberGenerator.new()
 	rng_core.seed = _mix_seed(_seed_value, _SALT_CORE)
 
-	# If you want *full spectrum*, either:
-	# - leave spectrum_bin_weights empty (size != 12 -> uniform random), OR
-	# - set all 12 weights to 1.0 in the preset.
-	var weights: PackedFloat32Array = _p_weights_12("spectrum_bin_weights")
-	var base_bin: int = _pick_weighted_index_12(rng_core, weights)
-
+	var base_bin: int = _pick_weighted_index_12(rng_core, _p_weights_12("spectrum_bin_weights"))
 	var h_core: float = (float(base_bin) + rng_core.randf()) / 12.0
 	var sat_min: float = _p_float("sat_min", 0.70)
 	var sat_max: float = _p_float("sat_max", 1.00)
@@ -357,51 +358,36 @@ func _assign_scheme_colors() -> void:
 
 	var s_core: float = rng_core.randf_range(sat_min, sat_max)
 	var v_core: float = rng_core.randf_range(val_min, val_max)
-
 	_col_core = Color.from_hsv(_wrap01(h_core), clampf(s_core, 0.0, 1.0), maxf(0.0, v_core), 1.0)
 
-	# -------------------------
-	# Scheme selection
-	# -------------------------
-	# global scheme may be fixed or "Random" (string) or -1.
-	var global_scheme: int = _p_scheme("color_scheme", -1)
+	# Pool to prevent duplicates (optional)
+	var pool: Array[int] = _ALL_SCHEMES.duplicate()
+	_reserve_override(head_scheme_override, pool)
+	_reserve_override(trail_scheme_override, pool)
+	_reserve_override(rings_scheme_override, pool)
+	_reserve_override(sparks_scheme_override, pool)
+
+	# Global scheme from preset (0=Random, 1..6=schemes)
+	var preset_scheme_raw: int = _p_int("color_scheme", 0)
+	var preset_scheme: int = _preset_scheme_to_internal(preset_scheme_raw)
+
+	var global_scheme: int = preset_scheme
 	if global_scheme < 0:
 		var rng_g: RandomNumberGenerator = RandomNumberGenerator.new()
 		rng_g.seed = _mix_seed(_seed_value, _SALT_SCHEME)
-		global_scheme = _ALL_SCHEMES[rng_g.randi_range(0, _ALL_SCHEMES.size() - 1)]
-	else:
-		global_scheme = clampi(global_scheme, 0, 5)
+		global_scheme = rng_g.randi_range(0, 5)
 
-	# pool to avoid duplicates across components (if configured)
-	var pool: Array[int] = _ALL_SCHEMES.duplicate()
+	# Resolve per-component schemes deterministically
+	_scheme_head = _resolve_component_scheme(head_scheme_override, global_scheme, pool, _SALT_HEAD)
+	_scheme_trail = _resolve_component_scheme(trail_scheme_override, global_scheme, pool, _SALT_TRAIL)
+	_scheme_rings = _resolve_component_scheme(rings_scheme_override, global_scheme, pool, _SALT_RINGS)
+	_scheme_sparks = _resolve_component_scheme(sparks_scheme_override, global_scheme, pool, _SALT_SPARKS)
 
-	var scheme_head: int = _resolve_component_scheme_pool(head_scheme_override, global_scheme, pool, _SALT_HEAD)
-	var scheme_trail: int = _resolve_component_scheme_pool(trail_scheme_override, global_scheme, pool, _SALT_TRAIL)
-	var scheme_rings: int = _resolve_component_scheme_pool(rings_scheme_override, global_scheme, pool, _SALT_RINGS)
-	var scheme_sparks: int = _resolve_component_scheme_pool(sparks_scheme_override, global_scheme, pool, _SALT_SPARKS)
-
-	# -------------------------
-	# Palettes anchored to core hue; pick per-component colors deterministically
-	# -------------------------
-	_col_head = _pick_from_palette(
-		_palette_for_scheme(scheme_head, _col_core, _mix_seed(_seed_value, _SALT_HEAD)),
-		_mix_seed(_seed_value, _SALT_HEAD ^ 0xA5A5A5A5)
-	)
-
-	_col_trail = _pick_from_palette(
-		_palette_for_scheme(scheme_trail, _col_core, _mix_seed(_seed_value, _SALT_TRAIL)),
-		_mix_seed(_seed_value, _SALT_TRAIL ^ 0xA5A5A5A5)
-	)
-
-	_col_rings = _pick_from_palette(
-		_palette_for_scheme(scheme_rings, _col_core, _mix_seed(_seed_value, _SALT_RINGS)),
-		_mix_seed(_seed_value, _SALT_RINGS ^ 0xA5A5A5A5)
-	)
-
-	_col_sparks = _pick_from_palette(
-		_palette_for_scheme(scheme_sparks, _col_core, _mix_seed(_seed_value, _SALT_SPARKS)),
-		_mix_seed(_seed_value, _SALT_SPARKS ^ 0xA5A5A5A5)
-	)
+	# Colors from each component palette (anchored to core hue)
+	_col_head = _pick_from_palette(_palette_for_scheme(_scheme_head, _col_core, _mix_seed(_seed_value, _SALT_HEAD)), _mix_seed(_seed_value, _SALT_HEAD ^ 0x1))
+	_col_trail = _pick_from_palette(_palette_for_scheme(_scheme_trail, _col_core, _mix_seed(_seed_value, _SALT_TRAIL)), _mix_seed(_seed_value, _SALT_TRAIL ^ 0x1))
+	_col_rings = _pick_from_palette(_palette_for_scheme(_scheme_rings, _col_core, _mix_seed(_seed_value, _SALT_RINGS)), _mix_seed(_seed_value, _SALT_RINGS ^ 0x1))
+	_col_sparks = _pick_from_palette(_palette_for_scheme(_scheme_sparks, _col_core, _mix_seed(_seed_value, _SALT_SPARKS)), _mix_seed(_seed_value, _SALT_SPARKS ^ 0x1))
 
 func _assign_random_colors() -> void:
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
@@ -413,37 +399,21 @@ func _assign_random_colors() -> void:
 	_col_rings = Color.from_hsv(rng.randf(), 1.0, 1.0, 1.0)
 	_col_sparks = Color.from_hsv(rng.randf(), 1.0, 1.0, 1.0)
 
-func _p_scheme(key: String, default_val: int) -> int:
-	# Accepts int/float OR strings like "Random", "Analogous", etc.
-	if preset == null:
-		return default_val
-	var v: Variant = preset.get(key)
-	if v == null:
-		return default_val
+func _preset_scheme_to_internal(preset_val: int) -> int:
+	# Preset: 0=Random, 1..6 = Mono..Tetradic
+	if preset_val <= 0:
+		return -1
+	return clampi(preset_val - 1, 0, 5)
 
-	var t: int = typeof(v)
-	if t == TYPE_INT:
-		return int(v)
-	if t == TYPE_FLOAT:
-		return int(round(float(v)))
-	if t == TYPE_STRING:
-		var s_key: String = String(v).strip_edges().to_lower()
-		match s_key:
-			"random":
-				return -1
-			"monochromatic", "mono":
-				return int(ColorScheme.MONOCHROMATIC)
-			"analogous":
-				return int(ColorScheme.ANALOGOUS)
-			"complementary", "complement":
-				return int(ColorScheme.COMPLEMENTARY)
-			"triad", "triadic":
-				return int(ColorScheme.TRIAD)
-			"split_complementary", "split-complementary", "split complementary":
-				return int(ColorScheme.SPLIT_COMPLEMENTARY)
-			"tetradic", "tetrad":
-				return int(ColorScheme.TETRADIC)
-	return default_val
+func _reserve_override(override_val: int, pool: Array[int]) -> void:
+	if allow_duplicate_component_schemes:
+		return
+	if override_val < 0:
+		return
+	var v: int = clampi(override_val, 0, 5)
+	var idx: int = pool.find(v)
+	if idx != -1:
+		pool.remove_at(idx)
 
 func _pick_scheme_from_pool(pool: Array[int], seed_i: int) -> int:
 	if pool.is_empty():
@@ -453,20 +423,16 @@ func _pick_scheme_from_pool(pool: Array[int], seed_i: int) -> int:
 	r.seed = seed_i
 	return pool[r.randi_range(0, pool.size() - 1)]
 
-func _resolve_component_scheme_pool(override_val: int, global_scheme: int, pool: Array[int], salt: int) -> int:
-	# override_val: -1 = auto/random, else 0..5
-	var chosen: int
-
+func _resolve_component_scheme(override_val: int, global_scheme: int, pool: Array[int], salt: int) -> int:
 	if override_val >= 0:
-		chosen = clampi(override_val, 0, 5)
-	elif not separate_component_schemes:
-		chosen = clampi(global_scheme, 0, 5)
-	else:
-		chosen = _pick_scheme_from_pool(pool, _mix_seed(_seed_value, salt ^ _SALT_SCHEME))
+		return clampi(override_val, 0, 5)
 
+	if not separate_component_schemes:
+		return clampi(global_scheme, 0, 5)
+
+	var chosen: int = _pick_scheme_from_pool(pool, _mix_seed(_seed_value, salt ^ _SALT_SCHEME))
 	if not allow_duplicate_component_schemes:
 		pool.erase(chosen)
-
 	return chosen
 
 func _palette_for_scheme(scheme_i: int, core_col: Color, sub_seed: int) -> Array[Color]:
@@ -576,7 +542,7 @@ func _energy_shader() -> Shader:
 	var sh: Shader = Shader.new()
 	sh.code = """
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_alpha_prepass;
+render_mode unshaded, cull_disabled, depth_prepass_alpha;
 
 uniform sampler2D noise_tex;
 uniform vec4 albedo_color : source_color = vec4(1.0);
@@ -607,7 +573,7 @@ func _rings_shader() -> Shader:
 	var sh: Shader = Shader.new()
 	sh.code = """
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_alpha_prepass;
+render_mode unshaded, cull_disabled, depth_prepass_alpha;
 
 uniform vec3 ring_color : source_color = vec3(1.0);
 uniform float emission_mul = 2.0;
@@ -754,9 +720,13 @@ func _find_camera() -> Camera3D:
 	var cam: Camera3D = get_viewport().get_camera_3d()
 	if cam != null:
 		return cam
-	# fallback: first Camera3D under this node
-	var c: Camera3D = find_child("", "Camera3D", true, false) as Camera3D
-	return c
+
+	# fallback: a Camera3D node named "Camera3D" under this projectile
+	var n: Node = find_child("Camera3D", true, false)
+	if n != null and n is Camera3D:
+		return n as Camera3D
+
+	return null
 
 # -----------------------------
 # Preset getters (safe)
