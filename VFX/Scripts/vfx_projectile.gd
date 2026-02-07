@@ -141,24 +141,25 @@ func _ready() -> void:
 		apply_seed(_seed_value)
 
 func _process(delta: float) -> void:
-	# Keep rings attached + facing camera
 	if _rings != null and rings_enabled:
+		# Anchor (local-space) so it doesn't drift
+		var base_pos := rings_local_offset
 		if rings_anchor_to_head and _head != null:
-			_rings.global_position = _head.global_position
-		_rings.position = rings_local_offset
+			base_pos += _head.position
+		_rings.position = base_pos
 
-		if absf(rings_breath_amount) > 0.00001:
-			var t_sec: float = float(Time.get_ticks_msec()) * 0.001
-			var breath: float = 1.0 + rings_breath_amount * sin((t_sec + _rings_phase) * rings_breath_speed * TAU)
-			_rings.scale = Vector3.ONE * _rings_scale_base * maxf(0.01, breath)
-		else:
-			_rings.scale = Vector3.ONE * _rings_scale_base
-
+		# Face camera
 		if rings_face_camera:
 			var cam: Camera3D = _find_camera()
 			if cam != null:
 				_rings.look_at(cam.global_position, Vector3.UP)
-		# Spin around its forward axis (after facing camera, still looks fine for concentric rings)
+
+		# Breathing scale (do AFTER look_at, because look_at can stomp scale)
+		var t := float(Time.get_ticks_msec()) * 0.001
+		var breath := 1.0 + rings_breath_amount * sin((t + _rings_phase) * TAU * rings_breath_speed)
+		_rings.scale = Vector3.ONE * (_rings_scale_base * breath)
+
+		# Spin (optional)
 		if absf(rings_spin_speed) > 0.00001:
 			_rings.rotate_object_local(Vector3.FORWARD, rings_spin_speed * delta)
 
@@ -184,6 +185,7 @@ func apply_preset(new_preset: Resource) -> void:
 func _apply_all() -> void:
 	_ensure_nodes()
 	_noise_tex = _build_noise_texture()
+	_rings_phase = float((_mix_seed(_seed_value, _SALT_RINGS) % 1000)) * 0.001
 
 	_assign_scheme_colors()
 
@@ -267,22 +269,15 @@ func _apply_rings() -> void:
 	if not _rings.visible:
 		return
 
-	# Keep centered to head
-	if rings_anchor_to_head and _head != null:
-		_rings.global_position = _head.global_position
-	_rings.position = rings_local_offset
-
-	# Create quad if none
-	if _rings.mesh == null:
-		var q: QuadMesh = QuadMesh.new()
-		q.size = Vector2.ONE
+	# Ensure quad mesh and keep its size synced
+	var q: QuadMesh = _rings.mesh as QuadMesh
+	if q == null:
+		q = QuadMesh.new()
 		_rings.mesh = q
-	elif _rings.mesh is QuadMesh:
-		(_rings.mesh as QuadMesh).size = Vector2.ONE
+	q.size = Vector2.ONE * _p_float("rings_quad_size", rings_quad_size)
 
-	_rings_scale_base = maxf(0.01, rings_quad_size)
-	_rings.scale = Vector3.ONE * _rings_scale_base
-	_rings_phase = float(_mix_seed(_seed_value, _SALT_RINGS) % 10000) * 0.0001
+	# Cache base scale (used by breathing in _process)
+	_rings_scale_base = _p_float("rings_scale", 0.55)
 
 	_mat_rings = _make_rings_material(_col_rings)
 	_rings.material_override = _mat_rings
