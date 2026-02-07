@@ -27,12 +27,44 @@ class_name VFXProjectile
 @export var trail_enabled: bool = true
 @export var rings_enabled: bool = true
 @export var sparks_enabled: bool = true
+@export var sparks_texture: Texture2D
+
+# Optional animated detail textures for energy components
+@export var core_texture: Texture2D
+@export var head_texture: Texture2D
+@export var tail_texture: Texture2D
+
+@export var energy_tex_uv_scale: Vector2 = Vector2.ONE
+@export var energy_tex_scroll: Vector2 = Vector2(0.25, -0.18)
+@export var energy_tex_rotate_speed: float = 0.0
+@export_range(0.0, 1.0, 0.01) var energy_tex_strength: float = 0.6
+@export var energy_distort_strength: float = 0.05
 
 # Rings behavior
 @export var rings_anchor_to_head: bool = true
 @export var rings_face_camera: bool = true
 @export var rings_local_offset: Vector3 = Vector3.ZERO
 @export var rings_spin_speed: float = 1.0
+
+# Rings sizing + breathing
+@export var rings_quad_size: float = 0.9
+@export var rings_min_radius: float = 0.60
+@export var rings_max_radius: float = 0.92
+@export var rings_breath_amount: float = 0.08
+@export var rings_breath_speed: float = 1.2
+@export var rings_auto_fit_to_head: bool = true
+@export var rings_outer_radius_multiplier: float = 1.18
+
+# Rings pulse (brightness)
+@export var rings_pulse_base: float = 0.85
+@export var rings_pulse_amp: float = 0.25
+
+# Optional rings texture (mask/noise) + animation
+@export var rings_texture: Texture2D
+@export var rings_tex_uv_scale: Vector2 = Vector2.ONE
+@export var rings_tex_scroll: Vector2 = Vector2(0.10, -0.08)
+@export var rings_tex_rotate_speed: float = 0.0
+@export_range(0.0, 1.0, 0.01) var rings_tex_strength: float = 0.0
 
 # Color scheme behavior
 @export var use_color_schemes: bool = true
@@ -67,12 +99,20 @@ var _col_trail: Color = Color.WHITE
 var _col_rings: Color = Color.WHITE
 var _col_sparks: Color = Color.WHITE
 
+var _scheme_head: int = 1
+var _scheme_trail: int = 1
+var _scheme_rings: int = 1
+var _scheme_sparks: int = 1
+
 # Cached materials
 var _mat_energy_core: ShaderMaterial
 var _mat_energy_inner: ShaderMaterial
 var _mat_energy_head: ShaderMaterial
 var _mat_energy_trail: ShaderMaterial
 var _mat_rings: ShaderMaterial
+var _white_tex: Texture2D
+var _rings_scale_base: float = 1.0
+var _rings_phase: float = 0.0
 
 # -----------------------------
 # Color schemes
@@ -93,12 +133,8 @@ const _SALT_CORE: int   = 0xC0DEC0DE
 const _SALT_SCHEME: int = 0x51A7C3A1
 const _SALT_HEAD: int   = 0x11EAD001
 const _SALT_TRAIL: int  = 0x7A11F00D
-const _SALT_RINGS: int  = 0xR1N65001 # INVALID in hex; do NOT use
-# Replace invalid literal with valid numeric:
-const _SALT_RINGS_OK: int = 0x716E6501
-const _SALT_SPARKS: int = 0x5PA4B5 # INVALID in hex; do NOT use
-# Replace invalid literal with valid numeric:
-const _SALT_SPARKS_OK: int = 0x5FA4B500
+const _SALT_RINGS: int  = 0x716E6501
+const _SALT_SPARKS: int = 0x5FA4B500
 
 # -----------------------------
 # Godot lifecycle
@@ -119,15 +155,25 @@ func _ready() -> void:
 		apply_seed(_seed_value)
 
 func _process(delta: float) -> void:
-	# Keep rings attached + facing camera
 	if _rings != null and rings_enabled:
+		# Anchor (local-space) so it doesn't drift
+		var base_pos := rings_local_offset
 		if rings_anchor_to_head and _head != null:
-			_rings.global_position = _head.global_position
+			base_pos += _head.position
+		_rings.position = base_pos
+
+		# Face camera
 		if rings_face_camera:
 			var cam: Camera3D = _find_camera()
 			if cam != null:
 				_rings.look_at(cam.global_position, Vector3.UP)
-		# Spin around its forward axis (after facing camera, still looks fine for concentric rings)
+
+		# Breathing scale (do AFTER look_at, because look_at can stomp scale)
+		var t := float(Time.get_ticks_msec()) * 0.001
+		var breath := 1.0 + rings_breath_amount * sin((t + _rings_phase) * TAU * rings_breath_speed)
+		_rings.scale = Vector3.ONE * (_rings_scale_base * breath)
+
+		# Spin (optional)
 		if absf(rings_spin_speed) > 0.00001:
 			_rings.rotate_object_local(Vector3.FORWARD, rings_spin_speed * delta)
 
@@ -153,6 +199,7 @@ func apply_preset(new_preset: Resource) -> void:
 func _apply_all() -> void:
 	_ensure_nodes()
 	_noise_tex = _build_noise_texture()
+	_rings_phase = float((_mix_seed(_seed_value, _SALT_RINGS) % 1000)) * 0.001
 
 	_assign_scheme_colors()
 
@@ -176,7 +223,7 @@ func _apply_core() -> void:
 		_core.mesh = m
 	_core.scale = Vector3.ONE * _p_float("core_scale", 0.45)
 
-	_mat_energy_core = _make_energy_material(_col_core, _p_float("core_alpha", 0.55), _p_float("core_emission_strength", 1.6))
+	_mat_energy_core = _make_energy_material(_col_core, _p_float("core_alpha", 0.55), _p_float("core_emission_strength", 1.6), core_texture)
 	_core.material_override = _mat_energy_core
 
 	# Inner core
@@ -190,7 +237,7 @@ func _apply_core() -> void:
 			_core_inner.scale = Vector3.ONE * _p_float("core_inner_scale", 0.30)
 
 			var inner_col: Color = _brighten(_col_core, 1.35)
-			_mat_energy_inner = _make_energy_material(inner_col, _p_float("core_inner_alpha", 0.55), _p_float("core_inner_emission_strength", 1.6))
+			_mat_energy_inner = _make_energy_material(inner_col, _p_float("core_inner_alpha", 0.55), _p_float("core_inner_emission_strength", 1.6), core_texture)
 			_core_inner.material_override = _mat_energy_inner
 
 func _apply_head() -> void:
@@ -207,7 +254,7 @@ func _apply_head() -> void:
 		_head.mesh = m
 	_head.scale = Vector3.ONE * _p_float("head_scale", 0.85)
 
-	_mat_energy_head = _make_energy_material(_col_head, _p_float("head_alpha", 0.55), _p_float("head_emission_strength", 1.6))
+	_mat_energy_head = _make_energy_material(_col_head, _p_float("head_alpha", 0.55), _p_float("head_emission_strength", 1.6), head_texture)
 	_head.material_override = _mat_energy_head
 
 func _apply_trail() -> void:
@@ -225,7 +272,7 @@ func _apply_trail() -> void:
 	_trail.scale = Vector3.ONE * _p_float("tail_scale", 0.9)
 	_trail.position = _p_vec3("tail_offset", Vector3(-1.4, 0.0, 0.0))
 
-	_mat_energy_trail = _make_energy_material(_col_trail, _p_float("tail_alpha", 0.35), _p_float("tail_emission_strength", 1.35))
+	_mat_energy_trail = _make_energy_material(_col_trail, _p_float("tail_alpha", 0.35), _p_float("tail_emission_strength", 1.35), tail_texture)
 	_trail.material_override = _mat_energy_trail
 
 func _apply_rings() -> void:
@@ -236,18 +283,36 @@ func _apply_rings() -> void:
 	if not _rings.visible:
 		return
 
-	# Keep centered to head
-	if rings_anchor_to_head and _head != null:
-		_rings.global_position = _head.global_position
-	_rings.position += rings_local_offset
-
-	# Create quad if none
-	if _rings.mesh == null:
-		var q: QuadMesh = QuadMesh.new()
-		q.size = Vector2.ONE * 2.0
+	# Ensure quad mesh and keep its size synced
+	var q: QuadMesh = _rings.mesh as QuadMesh
+	if q == null:
+		q = QuadMesh.new()
 		_rings.mesh = q
+	q.size = Vector2.ONE * _p_float("rings_quad_size", rings_quad_size)
 
-	_rings.scale = Vector3.ONE * _p_float("rings_scale", 1.35)
+	# Cache base scale (used by breathing in _process)
+	_rings_scale_base = _p_float("rings_scale", 0.40)
+
+	# Auto-fit rings so the outer ring hugs the head radius (better defaults out of the box).
+	# World outer radius ≈ max_r * (base_diameter * 0.5) * scale
+	if rings_auto_fit_to_head and _head != null and _head.mesh != null and _rings.mesh != null:
+		var max_r: float = _p_float("rings_max_radius", rings_max_radius)
+
+		var aabb: AABB = _head.mesh.get_aabb()
+		var sx: float = absf(_head.scale.x)
+		var sy: float = absf(_head.scale.y)
+		var sz: float = absf(_head.scale.z)
+		var head_r: float = 0.5 * maxf(maxf(aabb.size.x * sx, aabb.size.y * sy), aabb.size.z * sz)
+
+		var base_diam: float = 1.0
+		if _rings.mesh is QuadMesh:
+			base_diam = (_rings.mesh as QuadMesh).size.x
+		else:
+			base_diam = maxf(_rings.mesh.get_aabb().size.x, 0.00001)
+
+		var target_outer_r: float = head_r * rings_outer_radius_multiplier
+		var want_scale: float = (target_outer_r * 2.0) / (base_diam * maxf(max_r, 0.00001))
+		_rings_scale_base = clampf(want_scale, 0.01, 100.0)
 
 	_mat_rings = _make_rings_material(_col_rings)
 	_rings.material_override = _mat_rings
@@ -303,29 +368,48 @@ func _apply_sparks() -> void:
 	_set_prop(pm, "scale_min", _p_float("sparks_size_min", 0.05))
 	_set_prop(pm, "scale_max", _p_float("sparks_size_max", 0.10))
 
-	# Color (and optional full-spectrum ramp)
-	_set_prop(pm, "color", _col_sparks)
-	var use_full: bool = _p_bool("sparks_use_full_spectrum_step_palette", false)
-	if use_full:
-		var gfull: GradientTexture1D = _build_step_gradient(_palette_full_spectrum(), 12)
-		_set_prop(pm, "color_ramp", gfull)
-	else:
-		var g: GradientTexture1D = _build_step_gradient(_palette_for_scheme(int(ColorScheme.ANALOGOUS), _col_core, _mix_seed(_seed_value, _SALT_SPARKS_OK)), 6)
-		_set_prop(pm, "color_ramp", g)
+	# Color ramp: more steps = more visible variation
+	_set_prop(pm, "color", Color.WHITE)
+	var pal: Array[Color] = _palette_full_spectrum()
+	var hdr_mul: float = _p_float("sparks_hdr_mul", 2.0)
+	for i in pal.size():
+		pal[i] = Color(pal[i].r * hdr_mul, pal[i].g * hdr_mul, pal[i].b * hdr_mul, 1.0)
 
-	# Draw pass mesh/material (billboard + emission)
+	var g: GradientTexture1D = _build_step_gradient(
+		pal,
+		_p_int("sparks_palette_steps", 12)
+	)
+	_set_prop(pm, "color_ramp", g)
+
+	# Draw pass mesh/material (additive, bright, billboard)
 	var quad: QuadMesh = QuadMesh.new()
-	quad.size = Vector2.ONE * _p_float("sparks_quad_size", 0.06)
+	quad.size = Vector2.ONE * _p_float("sparks_quad_size", 0.14)
 	_set_prop(_sparks, "draw_pass_1", quad)
 
 	var sm: StandardMaterial3D = StandardMaterial3D.new()
 	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	sm.albedo_color = _col_sparks
-	sm.emission_enabled = true
-	sm.emission = _col_sparks
-	sm.emission_energy_multiplier = _p_float("sparks_emission_strength", 2.0)
+	sm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	sm.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
 	sm.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+
+	# Let particle COLOR / ramp drive the visible color
+	_set_prop(sm, "vertex_color_use_as_albedo", true)
+	sm.albedo_color = Color(1, 1, 1, 1)
+
+	# Extra punch (bloom/glow looks best if WorldEnvironment glow is enabled)
+	sm.emission_enabled = true
+	sm.emission = Color(1, 1, 1)
+	sm.emission_energy_multiplier = _p_float("sparks_emission_strength", 18.0)
+
+	# Optional texture for spark shape (alpha mask)
+	var s_tex := sparks_texture
+	if s_tex == null:
+		s_tex = _p_tex("sparks_texture")
+	if s_tex != null:
+		sm.albedo_texture = s_tex
+		sm.emission_texture = s_tex
+
 	_set_prop(_sparks, "draw_pass_1_material", sm)
 
 	# Built-in particle trails (if supported by this build)
@@ -356,25 +440,34 @@ func _assign_scheme_colors() -> void:
 	var v_core: float = rng_core.randf_range(val_min, val_max)
 	_col_core = Color.from_hsv(_wrap01(h_core), clampf(s_core, 0.0, 1.0), maxf(0.0, v_core), 1.0)
 
-	# Pick schemes per component (deterministic sub-seeds), optionally without duplicates
-	var available: Array[int] = _ALL_SCHEMES.duplicate()
+	# Pool to prevent duplicates (optional)
+	var pool: Array[int] = _ALL_SCHEMES.duplicate()
+	_reserve_override(head_scheme_override, pool)
+	_reserve_override(trail_scheme_override, pool)
+	_reserve_override(rings_scheme_override, pool)
+	_reserve_override(sparks_scheme_override, pool)
 
-	var base_scheme_pref: int = _p_int("color_scheme", int(ColorScheme.ANALOGOUS)) # 0..5, 5=tetradic in your preset
-	var global_scheme: int = base_scheme_pref
-	if _p_int("color_scheme", 1) == 5 and _p_bool("allow_random_color_scheme", false):
-		# optional user-side switch; if not present, ignored
-		global_scheme = int(ColorScheme.ANALOGOUS)
+	# Global scheme from preset (0=Random, 1..6=schemes)
+	var preset_scheme_raw: int = _p_int("color_scheme", 0)
+	var preset_scheme: int = _preset_scheme_to_internal(preset_scheme_raw)
 
-	var scheme_head: int = _resolve_component_scheme(head_scheme_override, global_scheme, available, _SALT_HEAD)
-	var scheme_trail: int = _resolve_component_scheme(trail_scheme_override, global_scheme, available, _SALT_TRAIL)
-	var scheme_rings: int = _resolve_component_scheme(rings_scheme_override, global_scheme, available, _SALT_RINGS_OK)
-	var scheme_sparks: int = _resolve_component_scheme(sparks_scheme_override, global_scheme, available, _SALT_SPARKS_OK)
+	var global_scheme: int = preset_scheme
+	if global_scheme < 0:
+		var rng_g: RandomNumberGenerator = RandomNumberGenerator.new()
+		rng_g.seed = _mix_seed(_seed_value, _SALT_SCHEME)
+		global_scheme = rng_g.randi_range(0, 5)
 
-	# Build per-component palette anchored to core hue and pick one color deterministically
-	_col_head = _pick_from_palette(_palette_for_scheme(scheme_head, _col_core, _mix_seed(_seed_value, _SALT_HEAD)), _mix_seed(_seed_value, _SALT_HEAD ^ 0x1))
-	_col_trail = _pick_from_palette(_palette_for_scheme(scheme_trail, _col_core, _mix_seed(_seed_value, _SALT_TRAIL)), _mix_seed(_seed_value, _SALT_TRAIL ^ 0x1))
-	_col_rings = _pick_from_palette(_palette_for_scheme(scheme_rings, _col_core, _mix_seed(_seed_value, _SALT_RINGS_OK)), _mix_seed(_seed_value, _SALT_RINGS_OK ^ 0x1))
-	_col_sparks = _pick_from_palette(_palette_for_scheme(scheme_sparks, _col_core, _mix_seed(_seed_value, _SALT_SPARKS_OK)), _mix_seed(_seed_value, _SALT_SPARKS_OK ^ 0x1))
+	# Resolve per-component schemes deterministically
+	_scheme_head = _resolve_component_scheme(head_scheme_override, global_scheme, pool, _SALT_HEAD)
+	_scheme_trail = _resolve_component_scheme(trail_scheme_override, global_scheme, pool, _SALT_TRAIL)
+	_scheme_rings = _resolve_component_scheme(rings_scheme_override, global_scheme, pool, _SALT_RINGS)
+	_scheme_sparks = _resolve_component_scheme(sparks_scheme_override, global_scheme, pool, _SALT_SPARKS)
+
+	# Colors from each component palette (anchored to core hue)
+	_col_head = _pick_from_palette(_palette_for_scheme(_scheme_head, _col_core, _mix_seed(_seed_value, _SALT_HEAD)), _mix_seed(_seed_value, _SALT_HEAD ^ 0x1))
+	_col_trail = _pick_from_palette(_palette_for_scheme(_scheme_trail, _col_core, _mix_seed(_seed_value, _SALT_TRAIL)), _mix_seed(_seed_value, _SALT_TRAIL ^ 0x1))
+	_col_rings = _pick_from_palette(_palette_for_scheme(_scheme_rings, _col_core, _mix_seed(_seed_value, _SALT_RINGS)), _mix_seed(_seed_value, _SALT_RINGS ^ 0x1))
+	_col_sparks = _pick_from_palette(_palette_for_scheme(_scheme_sparks, _col_core, _mix_seed(_seed_value, _SALT_SPARKS)), _mix_seed(_seed_value, _SALT_SPARKS ^ 0x1))
 
 func _assign_random_colors() -> void:
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
@@ -386,34 +479,49 @@ func _assign_random_colors() -> void:
 	_col_rings = Color.from_hsv(rng.randf(), 1.0, 1.0, 1.0)
 	_col_sparks = Color.from_hsv(rng.randf(), 1.0, 1.0, 1.0)
 
-func _resolve_component_scheme(override_val: int, global_scheme: int, available: Array[int], salt: int) -> int:
+func _preset_scheme_to_internal(preset_val: int) -> int:
+	# Preset: 0=Random, 1..6 = Mono..Tetradic
+	if preset_val <= 0:
+		return -1
+	return clampi(preset_val - 1, 0, 5)
+
+func _reserve_override(override_val: int, pool: Array[int]) -> void:
+	if allow_duplicate_component_schemes:
+		return
+	if override_val < 0:
+		return
+	var v: int = clampi(override_val, 0, 5)
+	var idx: int = pool.find(v)
+	if idx != -1:
+		pool.remove_at(idx)
+
+func _pick_scheme_from_pool(pool: Array[int], seed_i: int) -> int:
+	if pool.is_empty():
+		# fallback: allow reuse if pool exhausted
+		return int(ColorScheme.ANALOGOUS)
+	var r: RandomNumberGenerator = RandomNumberGenerator.new()
+	r.seed = seed_i
+	return pool[r.randi_range(0, pool.size() - 1)]
+
+func _resolve_component_scheme(override_val: int, global_scheme: int, pool: Array[int], salt: int) -> int:
 	if override_val >= 0:
 		return clampi(override_val, 0, 5)
 
 	if not separate_component_schemes:
 		return clampi(global_scheme, 0, 5)
 
-	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
-	rng.seed = _mix_seed(_seed_value, salt ^ _SALT_SCHEME)
-
-	# pick from available pool
-	var idx: int = 0
-	if available.size() > 1:
-		idx = rng.randi_range(0, available.size() - 1)
-	var picked: int = available[idx]
-
+	var chosen: int = _pick_scheme_from_pool(pool, _mix_seed(_seed_value, salt ^ _SALT_SCHEME))
 	if not allow_duplicate_component_schemes:
-		available.remove_at(idx)
-
-	return picked
+		pool.erase(chosen)
+	return chosen
 
 func _palette_for_scheme(scheme_i: int, core_col: Color, sub_seed: int) -> Array[Color]:
 	var rng: RandomNumberGenerator = RandomNumberGenerator.new()
 	rng.seed = sub_seed
 
 	var h: float = core_col.h
-	var s0: float = clampf(core_col.s, 0.0, 1.0)
-	var v0: float = maxf(0.0, core_col.v)
+	var _s0: float = clampf(core_col.s, 0.0, 1.0)
+	var _v0: float = maxf(0.0, core_col.v)
 
 	var sat_min: float = _p_float("sat_min", 0.70)
 	var sat_max: float = _p_float("sat_max", 1.00)
@@ -486,27 +594,57 @@ func _palette_full_spectrum() -> Array[Color]:
 # -----------------------------
 # Materials / shaders
 # -----------------------------
-func _make_energy_material(col: Color, alpha: float, emission_mul: float) -> ShaderMaterial:
+func _make_energy_material(col: Color, alpha: float, emission_mul: float, main_tex: Texture2D) -> ShaderMaterial:
 	var mat: ShaderMaterial = ShaderMaterial.new()
 	mat.shader = _energy_shader()
 	mat.set_shader_parameter("albedo_color", Color(col.r, col.g, col.b, clampf(alpha, 0.0, 1.0)))
 	mat.set_shader_parameter("emission_color", col)
 	mat.set_shader_parameter("emission_mul", emission_mul)
+
 	mat.set_shader_parameter("noise_tex", _noise_tex)
 	mat.set_shader_parameter("uv_scale", _p_float("uv_scale", 1.0))
 	mat.set_shader_parameter("scroll_speed", _p_float("scroll_speed", 0.35))
 	mat.set_shader_parameter("time_offset", float(_seed_value % 1000) * 0.001)
+
+	# New: optional animated texture like the tutorial
+	var tex := main_tex
+	if tex == null:
+		tex = _white_texture()
+	mat.set_shader_parameter("main_tex", tex)
+	mat.set_shader_parameter("main_strength", energy_tex_strength)
+	mat.set_shader_parameter("main_uv_scale", energy_tex_uv_scale)
+	mat.set_shader_parameter("main_scroll", energy_tex_scroll)
+	mat.set_shader_parameter("main_rotate_speed", energy_tex_rotate_speed)
+	mat.set_shader_parameter("distort_strength", energy_distort_strength)
 	return mat
 
 func _make_rings_material(col: Color) -> ShaderMaterial:
 	var mat: ShaderMaterial = ShaderMaterial.new()
 	mat.shader = _rings_shader()
+
+	var tex := rings_texture
+	if tex == null:
+		tex = _p_tex("rings_texture")
+
 	mat.set_shader_parameter("ring_color", col)
-	mat.set_shader_parameter("emission_mul", _p_float("rings_emission_strength", 2.0))
-	mat.set_shader_parameter("count", _p_int("rings_count", 4))
-	mat.set_shader_parameter("thickness", _p_float("rings_thickness", 0.06))
+	mat.set_shader_parameter("emission_mul", _p_float("rings_emission_strength", 2.5))
+	mat.set_shader_parameter("count", _p_int("rings_count", 3))
+	mat.set_shader_parameter("thickness", _p_float("rings_thickness", 0.045))
 	mat.set_shader_parameter("softness", _p_float("rings_softness", 0.06))
+
+	mat.set_shader_parameter("min_r", _p_float("rings_min_radius", rings_min_radius))
+	mat.set_shader_parameter("max_r", _p_float("rings_max_radius", rings_max_radius))
+
 	mat.set_shader_parameter("pulse_speed", _p_float("rings_pulse_speed", 1.2))
+	mat.set_shader_parameter("pulse_base", rings_pulse_base)
+	mat.set_shader_parameter("pulse_amp", rings_pulse_amp)
+
+	mat.set_shader_parameter("ring_tex", tex if tex != null else _white_texture())
+	mat.set_shader_parameter("tex_uv_scale", rings_tex_uv_scale)
+	mat.set_shader_parameter("tex_scroll", rings_tex_scroll)
+	mat.set_shader_parameter("tex_rotate_speed", rings_tex_rotate_speed)
+	mat.set_shader_parameter("tex_strength", rings_tex_strength)
+
 	mat.set_shader_parameter("time_offset", float((_seed_value ^ 0x55AA) % 1000) * 0.001)
 	return mat
 
@@ -514,24 +652,54 @@ func _energy_shader() -> Shader:
 	var sh: Shader = Shader.new()
 	sh.code = """
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_alpha_prepass;
+render_mode unshaded, cull_disabled, depth_prepass_alpha;
 
 uniform sampler2D noise_tex;
 uniform vec4 albedo_color : source_color = vec4(1.0);
 uniform vec3 emission_color : source_color = vec3(1.0);
 uniform float emission_mul = 1.0;
+
 uniform float uv_scale = 1.0;
 uniform float scroll_speed = 0.35;
 uniform float time_offset = 0.0;
 
-void fragment() {
-	vec2 uv = UV * uv_scale;
-	float t = TIME * scroll_speed + time_offset;
-	vec2 suv = uv + vec2(t, -t * 0.73);
+uniform sampler2D main_tex;
+uniform float main_strength = 0.0;        // 0..1
+uniform vec2 main_uv_scale = vec2(1.0,1.0);
+uniform vec2 main_scroll = vec2(0.0,0.0);
+uniform float main_rotate_speed = 0.0;    // rotations/sec
+uniform float distort_strength = 0.0;
 
+vec2 rot2(vec2 p, float a){
+	float s = sin(a);
+	float c = cos(a);
+	return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+}
+
+void fragment() {
+	float tt = TIME + time_offset;
+
+	// Base noise scroll (your existing motion)
+	vec2 uv = UV * uv_scale;
+	vec2 suv = uv + vec2(tt * scroll_speed, -tt * scroll_speed * 0.73);
 	float n = texture(noise_tex, suv).r;
-	// Soft "rolling" density
 	float d = smoothstep(0.15, 0.85, n);
+
+	// Animated main texture (like tutorial “noise textures” in shader graph)
+	vec2 muv = UV * main_uv_scale;
+	muv += main_scroll * tt;
+
+	if (abs(main_rotate_speed) > 0.0001) {
+		float ang = tt * main_rotate_speed * 6.28318;
+		muv = rot2(muv - vec2(0.5), ang) + vec2(0.5);
+	}
+
+	// Distort main UVs using noise
+	vec2 dv = texture(noise_tex, suv * 1.25).rg * 2.0 - 1.0;
+	muv += dv * distort_strength;
+
+	float m = texture(main_tex, muv).r; // use red channel as mask
+	d = mix(d, d * m, clamp(main_strength, 0.0, 1.0));
 
 	ALBEDO = albedo_color.rgb;
 	ALPHA  = albedo_color.a * (0.25 + 0.75 * d);
@@ -545,15 +713,34 @@ func _rings_shader() -> Shader:
 	var sh: Shader = Shader.new()
 	sh.code = """
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_draw_alpha_prepass;
+render_mode unshaded, cull_disabled, depth_prepass_alpha;
 
 uniform vec3 ring_color : source_color = vec3(1.0);
-uniform float emission_mul = 2.0;
-uniform int count = 4;
-uniform float thickness = 0.06;
+uniform float emission_mul = 2.5;
+
+uniform int count = 3;
+uniform float thickness = 0.045;
 uniform float softness = 0.06;
+
+uniform float min_r = 0.60;
+uniform float max_r = 0.92;
+
 uniform float pulse_speed = 1.2;
+uniform float pulse_base = 0.85;
+uniform float pulse_amp = 0.25;
 uniform float time_offset = 0.0;
+
+uniform sampler2D ring_tex;
+uniform vec2 tex_uv_scale = vec2(1.0, 1.0);
+uniform vec2 tex_scroll = vec2(0.0, 0.0);
+uniform float tex_rotate_speed = 0.0; // rotations/sec
+uniform float tex_strength = 0.0;     // 0..1
+
+vec2 rot2(vec2 p, float a){
+	float s = sin(a);
+	float c = cos(a);
+	return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+}
 
 float ring_mask(float r, float center_r, float thick, float soft) {
 	float d = abs(r - center_r);
@@ -566,25 +753,35 @@ void fragment() {
 	float r = length(p);
 
 	float t = TIME * pulse_speed + time_offset;
-	float pulse = 0.85 + 0.15 * sin(t * 6.28318);
+	float pulse = pulse_base + pulse_amp * sin(t * 6.28318);
 
 	float a = 0.0;
-
-	// Concentric rings (centers spread across [0.25..0.95])
 	float c = float(max(count, 1));
+
 	for (int i = 0; i < 32; i++) {
 		if (i >= count) break;
 		float fi = float(i);
-		float rr = mix(0.25, 0.95, (fi + 0.5) / c);
+		float rr = mix(min_r, max_r, (fi + 0.5) / c);
 		a = max(a, ring_mask(r, rr, thickness, softness));
 	}
 
-	// Fade out outside the last ring
+	// Optional texture modulation (mask/noise)
+	vec2 tuv = UV * tex_uv_scale;
+	tuv += tex_scroll * (TIME + time_offset);
+	if (abs(tex_rotate_speed) > 0.0001) {
+		float ang = (TIME + time_offset) * tex_rotate_speed * 6.28318;
+		tuv = rot2(tuv - vec2(0.5), ang) + vec2(0.5);
+	}
+	float tm = texture(ring_tex, tuv).r; // use red as mask
+	a *= mix(1.0, tm, clamp(tex_strength, 0.0, 1.0));
+
+	// Fade out at edge of quad
 	float fade = 1.0 - smoothstep(1.0, 1.05, r);
 
+	float alpha = a * fade * pulse;
 	ALBEDO = ring_color;
-	ALPHA = a * fade * pulse;
-	EMISSION = ring_color * emission_mul * ALPHA;
+	ALPHA = alpha;
+	EMISSION = ring_color * emission_mul * alpha;
 }
 """
 	return sh
@@ -692,9 +889,13 @@ func _find_camera() -> Camera3D:
 	var cam: Camera3D = get_viewport().get_camera_3d()
 	if cam != null:
 		return cam
-	# fallback: first Camera3D under this node
-	var c: Camera3D = find_child("", "Camera3D", true, false) as Camera3D
-	return c
+
+	# fallback: a Camera3D node named "Camera3D" under this projectile
+	var n: Node = find_child("Camera3D", true, false)
+	if n != null and n is Camera3D:
+		return n as Camera3D
+
+	return null
 
 # -----------------------------
 # Preset getters (safe)
@@ -758,6 +959,12 @@ func _p_weights_12(key: String) -> PackedFloat32Array:
 		out = v
 	return out
 
+func _p_tex(key: String) -> Texture2D:
+	if preset == null:
+		return null
+	var v = preset.get(key)
+	return v as Texture2D
+
 # -----------------------------
 # Small helpers
 # -----------------------------
@@ -806,6 +1013,14 @@ func _set_prop(obj: Object, prop: String, value) -> void:
 		return
 	if _has_prop(obj, prop):
 		obj.set(prop, value)
+
+func _white_texture() -> Texture2D:
+	if _white_tex != null:
+		return _white_tex
+	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, Color(1, 1, 1, 1))
+	_white_tex = ImageTexture.create_from_image(img)
+	return _white_tex
 
 func _has_prop(obj: Object, prop: String) -> bool:
 	var plist: Array[Dictionary] = obj.get_property_list()
