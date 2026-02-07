@@ -29,6 +29,17 @@ class_name VFXProjectile
 @export var sparks_enabled: bool = true
 @export var sparks_texture: Texture2D
 
+# Optional animated detail textures for energy components
+@export var core_texture: Texture2D
+@export var head_texture: Texture2D
+@export var tail_texture: Texture2D
+
+@export var energy_tex_uv_scale: Vector2 = Vector2.ONE
+@export var energy_tex_scroll: Vector2 = Vector2(0.25, -0.18)
+@export var energy_tex_rotate_speed: float = 0.0
+@export_range(0.0, 1.0, 0.01) var energy_tex_strength: float = 0.6
+@export var energy_distort_strength: float = 0.05
+
 # Rings behavior
 @export var rings_anchor_to_head: bool = true
 @export var rings_face_camera: bool = true
@@ -210,7 +221,7 @@ func _apply_core() -> void:
 		_core.mesh = m
 	_core.scale = Vector3.ONE * _p_float("core_scale", 0.45)
 
-	_mat_energy_core = _make_energy_material(_col_core, _p_float("core_alpha", 0.55), _p_float("core_emission_strength", 1.6))
+	_mat_energy_core = _make_energy_material(_col_core, _p_float("core_alpha", 0.55), _p_float("core_emission_strength", 1.6), core_texture)
 	_core.material_override = _mat_energy_core
 
 	# Inner core
@@ -224,7 +235,7 @@ func _apply_core() -> void:
 			_core_inner.scale = Vector3.ONE * _p_float("core_inner_scale", 0.30)
 
 			var inner_col: Color = _brighten(_col_core, 1.35)
-			_mat_energy_inner = _make_energy_material(inner_col, _p_float("core_inner_alpha", 0.55), _p_float("core_inner_emission_strength", 1.6))
+			_mat_energy_inner = _make_energy_material(inner_col, _p_float("core_inner_alpha", 0.55), _p_float("core_inner_emission_strength", 1.6), core_texture)
 			_core_inner.material_override = _mat_energy_inner
 
 func _apply_head() -> void:
@@ -241,7 +252,7 @@ func _apply_head() -> void:
 		_head.mesh = m
 	_head.scale = Vector3.ONE * _p_float("head_scale", 0.85)
 
-	_mat_energy_head = _make_energy_material(_col_head, _p_float("head_alpha", 0.55), _p_float("head_emission_strength", 1.6))
+	_mat_energy_head = _make_energy_material(_col_head, _p_float("head_alpha", 0.55), _p_float("head_emission_strength", 1.6), head_texture)
 	_head.material_override = _mat_energy_head
 
 func _apply_trail() -> void:
@@ -259,7 +270,7 @@ func _apply_trail() -> void:
 	_trail.scale = Vector3.ONE * _p_float("tail_scale", 0.9)
 	_trail.position = _p_vec3("tail_offset", Vector3(-1.4, 0.0, 0.0))
 
-	_mat_energy_trail = _make_energy_material(_col_trail, _p_float("tail_alpha", 0.35), _p_float("tail_emission_strength", 1.35))
+	_mat_energy_trail = _make_energy_material(_col_trail, _p_float("tail_alpha", 0.35), _p_float("tail_emission_strength", 1.35), tail_texture)
 	_trail.material_override = _mat_energy_trail
 
 func _apply_rings() -> void:
@@ -555,16 +566,28 @@ func _palette_full_spectrum() -> Array[Color]:
 # -----------------------------
 # Materials / shaders
 # -----------------------------
-func _make_energy_material(col: Color, alpha: float, emission_mul: float) -> ShaderMaterial:
+func _make_energy_material(col: Color, alpha: float, emission_mul: float, main_tex: Texture2D) -> ShaderMaterial:
 	var mat: ShaderMaterial = ShaderMaterial.new()
 	mat.shader = _energy_shader()
 	mat.set_shader_parameter("albedo_color", Color(col.r, col.g, col.b, clampf(alpha, 0.0, 1.0)))
 	mat.set_shader_parameter("emission_color", col)
 	mat.set_shader_parameter("emission_mul", emission_mul)
+
 	mat.set_shader_parameter("noise_tex", _noise_tex)
 	mat.set_shader_parameter("uv_scale", _p_float("uv_scale", 1.0))
 	mat.set_shader_parameter("scroll_speed", _p_float("scroll_speed", 0.35))
 	mat.set_shader_parameter("time_offset", float(_seed_value % 1000) * 0.001)
+
+	# New: optional animated texture like the tutorial
+	var tex := main_tex
+	if tex == null:
+		tex = _white_texture()
+	mat.set_shader_parameter("main_tex", tex)
+	mat.set_shader_parameter("main_strength", energy_tex_strength)
+	mat.set_shader_parameter("main_uv_scale", energy_tex_uv_scale)
+	mat.set_shader_parameter("main_scroll", energy_tex_scroll)
+	mat.set_shader_parameter("main_rotate_speed", energy_tex_rotate_speed)
+	mat.set_shader_parameter("distort_strength", energy_distort_strength)
 	return mat
 
 func _make_rings_material(col: Color) -> ShaderMaterial:
@@ -607,18 +630,47 @@ uniform sampler2D noise_tex;
 uniform vec4 albedo_color : source_color = vec4(1.0);
 uniform vec3 emission_color : source_color = vec3(1.0);
 uniform float emission_mul = 1.0;
+
 uniform float uv_scale = 1.0;
 uniform float scroll_speed = 0.35;
 uniform float time_offset = 0.0;
 
-void fragment() {
-	vec2 uv = UV * uv_scale;
-	float t = TIME * scroll_speed + time_offset;
-	vec2 suv = uv + vec2(t, -t * 0.73);
+uniform sampler2D main_tex;
+uniform float main_strength = 0.0;        // 0..1
+uniform vec2 main_uv_scale = vec2(1.0,1.0);
+uniform vec2 main_scroll = vec2(0.0,0.0);
+uniform float main_rotate_speed = 0.0;    // rotations/sec
+uniform float distort_strength = 0.0;
 
+vec2 rot2(vec2 p, float a){
+	float s = sin(a), c = cos(a);
+	return mat2(c, -s, s, c) * p;
+}
+
+void fragment() {
+	float tt = TIME + time_offset;
+
+	// Base noise scroll (your existing motion)
+	vec2 uv = UV * uv_scale;
+	vec2 suv = uv + vec2(tt * scroll_speed, -tt * scroll_speed * 0.73);
 	float n = texture(noise_tex, suv).r;
-	// Soft "rolling" density
 	float d = smoothstep(0.15, 0.85, n);
+
+	// Animated main texture (like tutorial “noise textures” in shader graph)
+	vec2 muv = UV * main_uv_scale;
+	muv += main_scroll * tt;
+
+	if (abs(main_rotate_speed) > 0.0001) {
+		float ang = tt * main_rotate_speed * 6.28318;
+		muv = rot2(muv - vec2(0.5), ang) + vec2(0.5);
+	}
+
+	// Distort main UVs using noise
+	vec2 dv = texture(noise_tex, suv * 1.25).rg * 2.0 - 1.0;
+	muv += dv * distort_strength;
+
+	float m = texture(main_tex, muv).r; // use red channel as mask
+	d = mix(d, d * m, clamp(main_strength, 0.0, 1.0));
 
 	ALBEDO = albedo_color.rgb;
 	ALPHA  = albedo_color.a * (0.25 + 0.75 * d);
