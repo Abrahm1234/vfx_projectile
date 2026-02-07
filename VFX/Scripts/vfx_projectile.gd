@@ -26,13 +26,19 @@ class_name VFXProjectile
 # Environment/glow defaults for "white-hot" look
 @export_range(0.0, 4.0, 0.01) var env_glow_intensity: float = 1.2
 @export_range(0.0, 4.0, 0.01) var env_glow_strength: float = 1.5
-@export_range(0.0, 8.0, 0.01) var env_glow_hdr_threshold: float = 0.9
-@export_range(0.0, 2.0, 0.01) var env_glow_bloom: float = 0.45
+@export_range(0.0, 8.0, 0.01) var env_glow_hdr_threshold: float = 1.25
+@export_range(0.0, 2.0, 0.01) var env_glow_bloom: float = 0.25
 @export var env_glow_blend_mode_additive: bool = true
-@export var env_glow_levels: PackedFloat32Array = PackedFloat32Array([0.0, 0.85, 0.75, 0.55, 0.30, 0.18, 0.10])
+@export var env_glow_levels: PackedFloat32Array = PackedFloat32Array([0.0, 0.65, 0.58, 0.40, 0.22, 0.12, 0.06])
+@export var debug_environment_setup_once: bool = false
 
 # Additive blending controls for energy layers
-@export var additive_energy_blend: bool = false
+@export var additive_energy_blend: bool = true # legacy/global toggle
+@export var use_component_additive_blend: bool = true
+@export var additive_core_blend: bool = true
+@export var additive_core_inner_blend: bool = true
+@export var additive_head_blend: bool = true
+@export var additive_trail_blend: bool = false
 @export var additive_rings_blend: bool = true
 
 # Component toggles (in addition to preset enables)
@@ -127,6 +133,7 @@ var _mat_rings: ShaderMaterial
 var _white_tex: Texture2D
 var _rings_scale_base: float = 1.0
 var _rings_phase: float = 0.0
+var _environment_debug_printed: bool = false
 
 # -----------------------------
 # Color schemes
@@ -239,7 +246,8 @@ func _apply_core() -> void:
 		_core.mesh = m
 	_core.scale = Vector3.ONE * _p_float("core_scale", 0.45)
 
-	_mat_energy_core = _make_energy_material(_col_core, _p_float("core_alpha", 0.55), _p_float("core_emission_strength", 1.6), core_texture)
+	var core_additive: bool = additive_core_blend if use_component_additive_blend else additive_energy_blend
+	_mat_energy_core = _make_energy_material(_col_core, _p_float("core_alpha", 0.55), _p_float("core_emission_strength", 1.6), core_texture, core_additive)
 	_core.material_override = _mat_energy_core
 
 	# Inner core
@@ -253,7 +261,8 @@ func _apply_core() -> void:
 			_core_inner.scale = Vector3.ONE * _p_float("core_inner_scale", 0.30)
 
 			var inner_col: Color = _brighten(_col_core, 1.35)
-			_mat_energy_inner = _make_energy_material(inner_col, _p_float("core_inner_alpha", 0.55), _p_float("core_inner_emission_strength", 1.6), core_texture)
+			var inner_additive: bool = additive_core_inner_blend if use_component_additive_blend else additive_energy_blend
+			_mat_energy_inner = _make_energy_material(inner_col, _p_float("core_inner_alpha", 0.55), _p_float("core_inner_emission_strength", 1.6), core_texture, inner_additive)
 			_core_inner.material_override = _mat_energy_inner
 
 func _apply_head() -> void:
@@ -270,7 +279,8 @@ func _apply_head() -> void:
 		_head.mesh = m
 	_head.scale = Vector3.ONE * _p_float("head_scale", 0.85)
 
-	_mat_energy_head = _make_energy_material(_col_head, _p_float("head_alpha", 0.55), _p_float("head_emission_strength", 1.6), head_texture)
+	var head_additive: bool = additive_head_blend if use_component_additive_blend else additive_energy_blend
+	_mat_energy_head = _make_energy_material(_col_head, _p_float("head_alpha", 0.55), _p_float("head_emission_strength", 1.6), head_texture, head_additive)
 	_head.material_override = _mat_energy_head
 
 func _apply_trail() -> void:
@@ -288,7 +298,8 @@ func _apply_trail() -> void:
 	_trail.scale = Vector3.ONE * _p_float("tail_scale", 0.9)
 	_trail.position = _p_vec3("tail_offset", Vector3(-1.4, 0.0, 0.0))
 
-	_mat_energy_trail = _make_energy_material(_col_trail, _p_float("tail_alpha", 0.35), _p_float("tail_emission_strength", 1.35), tail_texture)
+	var trail_additive: bool = additive_trail_blend if use_component_additive_blend else additive_energy_blend
+	_mat_energy_trail = _make_energy_material(_col_trail, _p_float("tail_alpha", 0.35), _p_float("tail_emission_strength", 1.35), tail_texture, trail_additive)
 	_trail.material_override = _mat_energy_trail
 
 func _apply_rings() -> void:
@@ -610,9 +621,9 @@ func _palette_full_spectrum() -> Array[Color]:
 # -----------------------------
 # Materials / shaders
 # -----------------------------
-func _make_energy_material(col: Color, alpha: float, emission_mul: float, main_tex: Texture2D) -> ShaderMaterial:
+func _make_energy_material(col: Color, alpha: float, emission_mul: float, main_tex: Texture2D, use_additive_blend: bool) -> ShaderMaterial:
 	var mat: ShaderMaterial = ShaderMaterial.new()
-	mat.shader = _energy_shader()
+	mat.shader = _energy_shader(use_additive_blend)
 	mat.set_shader_parameter("albedo_color", Color(col.r, col.g, col.b, clampf(alpha, 0.0, 1.0)))
 	mat.set_shader_parameter("emission_color", col)
 	mat.set_shader_parameter("emission_mul", emission_mul)
@@ -664,9 +675,9 @@ func _make_rings_material(col: Color) -> ShaderMaterial:
 	mat.set_shader_parameter("time_offset", float((_seed_value ^ 0x55AA) % 1000) * 0.001)
 	return mat
 
-func _energy_shader() -> Shader:
+func _energy_shader(use_additive_blend: bool) -> Shader:
 	var sh: Shader = Shader.new()
-	var blend_mode: String = "blend_add" if additive_energy_blend else "blend_mix"
+	var blend_mode: String = "blend_add" if use_additive_blend else "blend_mix"
 	sh.code = """
 shader_type spatial;
 render_mode unshaded, cull_disabled, depth_prepass_alpha, %s;
@@ -834,6 +845,14 @@ func _ensure_environment_glow() -> void:
 		var cam: Camera3D = _find_camera()
 		if cam != null:
 			_set_prop(cam, "environment", null)
+
+	if debug_environment_setup_once and not _environment_debug_printed:
+		_environment_debug_printed = true
+		var cam: Camera3D = _find_camera()
+		var cam_env_state: String = "no-camera"
+		if cam != null:
+			cam_env_state = "null" if cam.environment == null else "set"
+		print("[VFXProjectile] Environment setup: env_exists=", env != null, ", glow_enabled=", env.get("glow_enabled"), ", camera_environment=", cam_env_state)
 
 # -----------------------------
 # Noise texture
