@@ -27,6 +27,7 @@ class_name VFXProjectile
 @export var trail_enabled: bool = true
 @export var rings_enabled: bool = true
 @export var sparks_enabled: bool = true
+@export var sparks_texture: Texture2D
 
 # Rings behavior
 @export var rings_anchor_to_head: bool = true
@@ -333,32 +334,43 @@ func _apply_sparks() -> void:
 	_set_prop(pm, "scale_min", _p_float("sparks_size_min", 0.05))
 	_set_prop(pm, "scale_max", _p_float("sparks_size_max", 0.10))
 
-	# Color (and optional full-spectrum ramp)
-	_set_prop(pm, "color", _col_sparks)
-	var use_full: bool = _p_bool("sparks_use_full_spectrum_step_palette", false)
-	if use_full:
-		var gfull: GradientTexture1D = _build_step_gradient(_palette_full_spectrum(), 12)
-		_set_prop(pm, "color_ramp", gfull)
-	else:
-		var g: GradientTexture1D = _build_step_gradient(
-			_palette_for_scheme(_scheme_sparks, _col_core, _mix_seed(_seed_value, _SALT_SPARKS)),
-			6
-		)
-		_set_prop(pm, "color_ramp", g)
+	# Color ramp: more steps = more visible variation
+	_set_prop(pm, "color", Color.WHITE)
+	var g: GradientTexture1D = _build_step_gradient(
+		_palette_full_spectrum(),
+		_p_int("sparks_palette_steps", 12)
+	)
+	_set_prop(pm, "color_ramp", g)
 
-	# Draw pass mesh/material (billboard + emission)
+	# Draw pass mesh/material (additive, bright, billboard)
 	var quad: QuadMesh = QuadMesh.new()
-	quad.size = Vector2.ONE * _p_float("sparks_quad_size", 0.06)
+	quad.size = Vector2.ONE * _p_float("sparks_quad_size", 0.10)
 	_set_prop(_sparks, "draw_pass_1", quad)
 
 	var sm: StandardMaterial3D = StandardMaterial3D.new()
 	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	sm.albedo_color = _col_sparks
-	sm.emission_enabled = true
-	sm.emission = _col_sparks
-	sm.emission_energy_multiplier = _p_float("sparks_emission_strength", 2.0)
+	sm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	sm.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
 	sm.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+
+	# Let particle COLOR / ramp drive the visible color
+	_set_prop(sm, "vertex_color_use_as_albedo", true)
+	sm.albedo_color = Color(1, 1, 1, 1)
+
+	# Extra punch (bloom/glow looks best if WorldEnvironment glow is enabled)
+	sm.emission_enabled = true
+	sm.emission = Color(1, 1, 1)
+	sm.emission_energy_multiplier = _p_float("sparks_emission_strength", 10.0)
+
+	# Optional texture for spark shape (alpha mask)
+	var s_tex := sparks_texture
+	if s_tex == null:
+		s_tex = _p_tex("sparks_texture")
+	if s_tex != null:
+		sm.albedo_texture = s_tex
+		sm.emission_texture = s_tex
+
 	_set_prop(_sparks, "draw_pass_1_material", sm)
 
 	# Built-in particle trails (if supported by this build)
