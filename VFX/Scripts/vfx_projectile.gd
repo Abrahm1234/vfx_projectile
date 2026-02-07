@@ -34,6 +34,24 @@ class_name VFXProjectile
 @export var rings_local_offset: Vector3 = Vector3.ZERO
 @export var rings_spin_speed: float = 1.0
 
+# Rings sizing + breathing
+@export var rings_quad_size: float = 1.0
+@export var rings_min_radius: float = 0.60
+@export var rings_max_radius: float = 0.92
+@export var rings_breath_amount: float = 0.08
+@export var rings_breath_speed: float = 1.2
+
+# Rings pulse (brightness)
+@export var rings_pulse_base: float = 0.85
+@export var rings_pulse_amp: float = 0.25
+
+# Optional rings texture (mask/noise) + animation
+@export var rings_texture: Texture2D
+@export var rings_tex_uv_scale: Vector2 = Vector2.ONE
+@export var rings_tex_scroll: Vector2 = Vector2(0.10, -0.08)
+@export var rings_tex_rotate_speed: float = 0.0
+@export_range(0.0, 1.0, 0.01) var rings_tex_strength: float = 0.0
+
 # Color scheme behavior
 @export var use_color_schemes: bool = true
 @export var separate_component_schemes: bool = true
@@ -78,6 +96,9 @@ var _mat_energy_inner: ShaderMaterial
 var _mat_energy_head: ShaderMaterial
 var _mat_energy_trail: ShaderMaterial
 var _mat_rings: ShaderMaterial
+var _white_tex: Texture2D
+var _rings_scale_base: float = 1.0
+var _rings_phase: float = 0.0
 
 # -----------------------------
 # Color schemes
@@ -124,6 +145,15 @@ func _process(delta: float) -> void:
 	if _rings != null and rings_enabled:
 		if rings_anchor_to_head and _head != null:
 			_rings.global_position = _head.global_position
+		_rings.position = rings_local_offset
+
+		if absf(rings_breath_amount) > 0.00001:
+			var t_sec: float = float(Time.get_ticks_msec()) * 0.001
+			var breath: float = 1.0 + rings_breath_amount * sin((t_sec + _rings_phase) * rings_breath_speed * TAU)
+			_rings.scale = Vector3.ONE * _rings_scale_base * maxf(0.01, breath)
+		else:
+			_rings.scale = Vector3.ONE * _rings_scale_base
+
 		if rings_face_camera:
 			var cam: Camera3D = _find_camera()
 			if cam != null:
@@ -240,15 +270,19 @@ func _apply_rings() -> void:
 	# Keep centered to head
 	if rings_anchor_to_head and _head != null:
 		_rings.global_position = _head.global_position
-	_rings.position += rings_local_offset
+	_rings.position = rings_local_offset
 
 	# Create quad if none
 	if _rings.mesh == null:
 		var q: QuadMesh = QuadMesh.new()
-		q.size = Vector2.ONE * 2.0
+		q.size = Vector2.ONE
 		_rings.mesh = q
+	elif _rings.mesh is QuadMesh:
+		(_rings.mesh as QuadMesh).size = Vector2.ONE
 
-	_rings.scale = Vector3.ONE * _p_float("rings_scale", 1.35)
+	_rings_scale_base = maxf(0.01, rings_quad_size)
+	_rings.scale = Vector3.ONE * _rings_scale_base
+	_rings_phase = float(_mix_seed(_seed_value, _SALT_RINGS) % 10000) * 0.0001
 
 	_mat_rings = _make_rings_material(_col_rings)
 	_rings.material_override = _mat_rings
@@ -534,7 +568,18 @@ func _make_rings_material(col: Color) -> ShaderMaterial:
 	mat.set_shader_parameter("count", _p_int("rings_count", 4))
 	mat.set_shader_parameter("thickness", _p_float("rings_thickness", 0.06))
 	mat.set_shader_parameter("softness", _p_float("rings_softness", 0.06))
-	mat.set_shader_parameter("pulse_speed", _p_float("rings_pulse_speed", 1.2))
+	mat.set_shader_parameter("pulse_speed", rings_breath_speed)
+	mat.set_shader_parameter("pulse_base", rings_pulse_base)
+	mat.set_shader_parameter("pulse_amp", rings_pulse_amp)
+	mat.set_shader_parameter("min_radius", rings_min_radius)
+	mat.set_shader_parameter("max_radius", rings_max_radius)
+	var p_rings_tex: Texture2D = _p_tex("rings_texture")
+	var use_rings_tex: Texture2D = p_rings_tex if p_rings_tex != null else rings_texture
+	mat.set_shader_parameter("rings_tex", use_rings_tex if use_rings_tex != null else _white_texture())
+	mat.set_shader_parameter("rings_tex_uv_scale", rings_tex_uv_scale)
+	mat.set_shader_parameter("rings_tex_scroll", rings_tex_scroll)
+	mat.set_shader_parameter("rings_tex_rotate_speed", rings_tex_rotate_speed)
+	mat.set_shader_parameter("rings_tex_strength", rings_tex_strength)
 	mat.set_shader_parameter("time_offset", float((_seed_value ^ 0x55AA) % 1000) * 0.001)
 	return mat
 
@@ -581,6 +626,15 @@ uniform int count = 4;
 uniform float thickness = 0.06;
 uniform float softness = 0.06;
 uniform float pulse_speed = 1.2;
+uniform float pulse_base = 0.85;
+uniform float pulse_amp = 0.25;
+uniform float min_radius = 0.60;
+uniform float max_radius = 0.92;
+uniform sampler2D rings_tex;
+uniform vec2 rings_tex_uv_scale = vec2(1.0, 1.0);
+uniform vec2 rings_tex_scroll = vec2(0.10, -0.08);
+uniform float rings_tex_rotate_speed = 0.0;
+uniform float rings_tex_strength = 0.0;
 uniform float time_offset = 0.0;
 
 float ring_mask(float r, float center_r, float thick, float soft) {
@@ -594,24 +648,34 @@ void fragment() {
 	float r = length(p);
 
 	float t = TIME * pulse_speed + time_offset;
-	float pulse = 0.85 + 0.15 * sin(t * 6.28318);
+	float pulse = pulse_base + pulse_amp * sin(t * 6.28318);
 
 	float a = 0.0;
 
-	// Concentric rings (centers spread across [0.25..0.95])
+	// Concentric rings (centers spread across [min_radius..max_radius])
 	float c = float(max(count, 1));
+	float rr_min = clamp(min(min_radius, max_radius), 0.0, 1.2);
+	float rr_max = clamp(max(min_radius, max_radius), 0.0, 1.2);
 	for (int i = 0; i < 32; i++) {
 		if (i >= count) break;
 		float fi = float(i);
-		float rr = mix(0.25, 0.95, (fi + 0.5) / c);
+		float rr = mix(rr_min, rr_max, (fi + 0.5) / c);
 		a = max(a, ring_mask(r, rr, thickness, softness));
 	}
+
+	float ang = atan(p.y, p.x) + TIME * rings_tex_rotate_speed;
+	mat2 rot = mat2(cos(ang), -sin(ang), sin(ang), cos(ang));
+	vec2 tuv = (rot * (UV - vec2(0.5))) + vec2(0.5);
+	tuv = tuv * rings_tex_uv_scale + TIME * rings_tex_scroll;
+	float tex_v = texture(rings_tex, tuv).r;
+	float tex_mul = mix(1.0, tex_v, clamp(rings_tex_strength, 0.0, 1.0));
+	a *= tex_mul;
 
 	// Fade out outside the last ring
 	float fade = 1.0 - smoothstep(1.0, 1.05, r);
 
 	ALBEDO = ring_color;
-	ALPHA = a * fade * pulse;
+	ALPHA = a * fade * max(0.0, pulse);
 	EMISSION = ring_color * emission_mul * ALPHA;
 }
 """
@@ -790,6 +854,12 @@ func _p_weights_12(key: String) -> PackedFloat32Array:
 		out = v
 	return out
 
+func _p_tex(key: String) -> Texture2D:
+	if preset == null:
+		return null
+	var v = preset.get(key)
+	return v as Texture2D
+
 # -----------------------------
 # Small helpers
 # -----------------------------
@@ -838,6 +908,14 @@ func _set_prop(obj: Object, prop: String, value) -> void:
 		return
 	if _has_prop(obj, prop):
 		obj.set(prop, value)
+
+func _white_texture() -> Texture2D:
+	if _white_tex != null:
+		return _white_tex
+	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, Color(1, 1, 1, 1))
+	_white_tex = ImageTexture.create_from_image(img)
+	return _white_tex
 
 func _has_prop(obj: Object, prop: String) -> bool:
 	var plist: Array[Dictionary] = obj.get_property_list()
