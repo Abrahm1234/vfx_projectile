@@ -18,8 +18,22 @@ class_name VFXProjectile
 @export var preview_seed: int = 12368
 @export var auto_apply_on_ready: bool = true
 @export var randomize_seed_on_ready: bool = true
+@export var auto_setup_world_environment: bool = true
+@export var clear_camera_environment_override: bool = true
 
 @export var preset: Resource # should be VFXPreset
+
+# Environment/glow defaults for "white-hot" look
+@export_range(0.0, 4.0, 0.01) var env_glow_intensity: float = 1.2
+@export_range(0.0, 4.0, 0.01) var env_glow_strength: float = 1.5
+@export_range(0.0, 8.0, 0.01) var env_glow_hdr_threshold: float = 0.9
+@export_range(0.0, 2.0, 0.01) var env_glow_bloom: float = 0.45
+@export var env_glow_blend_mode_additive: bool = true
+@export var env_glow_levels: PackedFloat32Array = PackedFloat32Array([0.0, 0.85, 0.75, 0.55, 0.30, 0.18, 0.10])
+
+# Additive blending controls for energy layers
+@export var additive_energy_blend: bool = false
+@export var additive_rings_blend: bool = true
 
 # Component toggles (in addition to preset enables)
 @export var core_enabled: bool = true
@@ -143,6 +157,8 @@ func _ready() -> void:
 	_seed_value = preview_seed
 
 	_ensure_nodes()
+	if auto_setup_world_environment:
+		_ensure_environment_glow()
 
 	if Engine.is_editor_hint():
 		if auto_preview_in_editor and auto_apply_on_ready:
@@ -650,9 +666,10 @@ func _make_rings_material(col: Color) -> ShaderMaterial:
 
 func _energy_shader() -> Shader:
 	var sh: Shader = Shader.new()
+	var blend_mode: String = "blend_add" if additive_energy_blend else "blend_mix"
 	sh.code = """
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_prepass_alpha;
+render_mode unshaded, cull_disabled, depth_prepass_alpha, %s;
 
 uniform sampler2D noise_tex;
 uniform vec4 albedo_color : source_color = vec4(1.0);
@@ -706,14 +723,15 @@ void fragment() {
 
 	EMISSION = emission_color * emission_mul * (0.35 + 0.65 * d);
 }
-"""
+""" % blend_mode
 	return sh
 
 func _rings_shader() -> Shader:
 	var sh: Shader = Shader.new()
+	var blend_mode: String = "blend_add" if additive_rings_blend else "blend_mix"
 	sh.code = """
 shader_type spatial;
-render_mode unshaded, cull_disabled, depth_prepass_alpha;
+render_mode unshaded, cull_disabled, depth_prepass_alpha, %s;
 
 uniform vec3 ring_color : source_color = vec3(1.0);
 uniform float emission_mul = 2.5;
@@ -783,8 +801,39 @@ void fragment() {
 	ALPHA = alpha;
 	EMISSION = ring_color * emission_mul * alpha;
 }
-"""
+""" % blend_mode
 	return sh
+
+func _ensure_environment_glow() -> void:
+	var viewport: Viewport = get_viewport()
+	if viewport == null:
+		return
+
+	var world: World3D = viewport.world_3d
+	if world == null:
+		return
+
+	var env: Environment = world.environment
+	if env == null:
+		env = Environment.new()
+		world.environment = env
+
+	_set_prop(env, "glow_enabled", true)
+	_set_prop(env, "glow_intensity", env_glow_intensity)
+	_set_prop(env, "glow_strength", env_glow_strength)
+	_set_prop(env, "glow_hdr_threshold", env_glow_hdr_threshold)
+	_set_prop(env, "glow_bloom", env_glow_bloom)
+	_set_prop(env, "glow_blend_mode", 0 if env_glow_blend_mode_additive else 1)
+
+	var i: int = 0
+	while i < env_glow_levels.size() and i <= 6:
+		_set_prop(env, "glow_levels/" + str(i), maxf(0.0, env_glow_levels[i]))
+		i += 1
+
+	if clear_camera_environment_override:
+		var cam: Camera3D = _find_camera()
+		if cam != null:
+			_set_prop(cam, "environment", null)
 
 # -----------------------------
 # Noise texture
