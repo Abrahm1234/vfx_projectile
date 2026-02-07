@@ -35,7 +35,7 @@ class_name VFXProjectile
 @export var rings_spin_speed: float = 1.0
 
 # Rings sizing + breathing
-@export var rings_quad_size: float = 1.0
+@export var rings_quad_size: float = 0.9
 @export var rings_min_radius: float = 0.60
 @export var rings_max_radius: float = 0.92
 @export var rings_breath_amount: float = 0.08
@@ -558,23 +558,30 @@ func _make_energy_material(col: Color, alpha: float, emission_mul: float) -> Sha
 func _make_rings_material(col: Color) -> ShaderMaterial:
 	var mat: ShaderMaterial = ShaderMaterial.new()
 	mat.shader = _rings_shader()
+
+	var tex := rings_texture
+	if tex == null:
+		tex = _p_tex("rings_texture")
+
 	mat.set_shader_parameter("ring_color", col)
-	mat.set_shader_parameter("emission_mul", _p_float("rings_emission_strength", 2.0))
-	mat.set_shader_parameter("count", _p_int("rings_count", 4))
-	mat.set_shader_parameter("thickness", _p_float("rings_thickness", 0.06))
+	mat.set_shader_parameter("emission_mul", _p_float("rings_emission_strength", 2.5))
+	mat.set_shader_parameter("count", _p_int("rings_count", 3))
+	mat.set_shader_parameter("thickness", _p_float("rings_thickness", 0.045))
 	mat.set_shader_parameter("softness", _p_float("rings_softness", 0.06))
-	mat.set_shader_parameter("pulse_speed", rings_breath_speed)
+
+	mat.set_shader_parameter("min_r", _p_float("rings_min_radius", rings_min_radius))
+	mat.set_shader_parameter("max_r", _p_float("rings_max_radius", rings_max_radius))
+
+	mat.set_shader_parameter("pulse_speed", _p_float("rings_pulse_speed", 1.2))
 	mat.set_shader_parameter("pulse_base", rings_pulse_base)
 	mat.set_shader_parameter("pulse_amp", rings_pulse_amp)
-	mat.set_shader_parameter("min_radius", rings_min_radius)
-	mat.set_shader_parameter("max_radius", rings_max_radius)
-	var p_rings_tex: Texture2D = _p_tex("rings_texture")
-	var use_rings_tex: Texture2D = p_rings_tex if p_rings_tex != null else rings_texture
-	mat.set_shader_parameter("rings_tex", use_rings_tex if use_rings_tex != null else _white_texture())
-	mat.set_shader_parameter("rings_tex_uv_scale", rings_tex_uv_scale)
-	mat.set_shader_parameter("rings_tex_scroll", rings_tex_scroll)
-	mat.set_shader_parameter("rings_tex_rotate_speed", rings_tex_rotate_speed)
-	mat.set_shader_parameter("rings_tex_strength", rings_tex_strength)
+
+	mat.set_shader_parameter("ring_tex", tex if tex != null else _white_texture())
+	mat.set_shader_parameter("tex_uv_scale", rings_tex_uv_scale)
+	mat.set_shader_parameter("tex_scroll", rings_tex_scroll)
+	mat.set_shader_parameter("tex_rotate_speed", rings_tex_rotate_speed)
+	mat.set_shader_parameter("tex_strength", rings_tex_strength)
+
 	mat.set_shader_parameter("time_offset", float((_seed_value ^ 0x55AA) % 1000) * 0.001)
 	return mat
 
@@ -616,21 +623,30 @@ shader_type spatial;
 render_mode unshaded, cull_disabled, depth_prepass_alpha;
 
 uniform vec3 ring_color : source_color = vec3(1.0);
-uniform float emission_mul = 2.0;
-uniform int count = 4;
-uniform float thickness = 0.06;
+uniform float emission_mul = 2.5;
+
+uniform int count = 3;
+uniform float thickness = 0.045;
 uniform float softness = 0.06;
+
+uniform float min_r = 0.60;
+uniform float max_r = 0.92;
+
 uniform float pulse_speed = 1.2;
 uniform float pulse_base = 0.85;
 uniform float pulse_amp = 0.25;
-uniform float min_radius = 0.60;
-uniform float max_radius = 0.92;
-uniform sampler2D rings_tex;
-uniform vec2 rings_tex_uv_scale = vec2(1.0, 1.0);
-uniform vec2 rings_tex_scroll = vec2(0.10, -0.08);
-uniform float rings_tex_rotate_speed = 0.0;
-uniform float rings_tex_strength = 0.0;
 uniform float time_offset = 0.0;
+
+uniform sampler2D ring_tex;
+uniform vec2 tex_uv_scale = vec2(1.0, 1.0);
+uniform vec2 tex_scroll = vec2(0.0, 0.0);
+uniform float tex_rotate_speed = 0.0; // rotations/sec
+uniform float tex_strength = 0.0;     // 0..1
+
+vec2 rot2(vec2 p, float a){
+	float s = sin(a), c = cos(a);
+	return mat2(c, -s, s, c) * p;
+}
 
 float ring_mask(float r, float center_r, float thick, float soft) {
 	float d = abs(r - center_r);
@@ -646,32 +662,32 @@ void fragment() {
 	float pulse = pulse_base + pulse_amp * sin(t * 6.28318);
 
 	float a = 0.0;
-
-	// Concentric rings (centers spread across [min_radius..max_radius])
 	float c = float(max(count, 1));
-	float rr_min = clamp(min(min_radius, max_radius), 0.0, 1.2);
-	float rr_max = clamp(max(min_radius, max_radius), 0.0, 1.2);
+
 	for (int i = 0; i < 32; i++) {
 		if (i >= count) break;
 		float fi = float(i);
-		float rr = mix(rr_min, rr_max, (fi + 0.5) / c);
+		float rr = mix(min_r, max_r, (fi + 0.5) / c);
 		a = max(a, ring_mask(r, rr, thickness, softness));
 	}
 
-	float ang = atan(p.y, p.x) + TIME * rings_tex_rotate_speed;
-	mat2 rot = mat2(cos(ang), -sin(ang), sin(ang), cos(ang));
-	vec2 tuv = (rot * (UV - vec2(0.5))) + vec2(0.5);
-	tuv = tuv * rings_tex_uv_scale + TIME * rings_tex_scroll;
-	float tex_v = texture(rings_tex, tuv).r;
-	float tex_mul = mix(1.0, tex_v, clamp(rings_tex_strength, 0.0, 1.0));
-	a *= tex_mul;
+	// Optional texture modulation (mask/noise)
+	vec2 tuv = UV * tex_uv_scale;
+	tuv += tex_scroll * (TIME + time_offset);
+	if (abs(tex_rotate_speed) > 0.0001) {
+		float ang = (TIME + time_offset) * tex_rotate_speed * 6.28318;
+		tuv = rot2(tuv - vec2(0.5), ang) + vec2(0.5);
+	}
+	float tm = texture(ring_tex, tuv).r; // use red as mask
+	a *= mix(1.0, tm, clamp(tex_strength, 0.0, 1.0));
 
-	// Fade out outside the last ring
+	// Fade out at edge of quad
 	float fade = 1.0 - smoothstep(1.0, 1.05, r);
 
+	float alpha = a * fade * pulse;
 	ALBEDO = ring_color;
-	ALPHA = a * fade * max(0.0, pulse);
-	EMISSION = ring_color * emission_mul * ALPHA;
+	ALPHA = alpha;
+	EMISSION = ring_color * emission_mul * alpha;
 }
 """
 	return sh
