@@ -26,11 +26,11 @@ class_name VFXProjectile
 # Environment/glow defaults for "white-hot" look
 @export_range(0.0, 4.0, 0.01) var env_glow_intensity: float = 1.2
 @export_range(0.0, 4.0, 0.01) var env_glow_strength: float = 1.5
-@export_range(0.0, 8.0, 0.01) var env_glow_hdr_threshold: float = 1.25
-@export_range(0.0, 2.0, 0.01) var env_glow_bloom: float = 0.25
+@export_range(0.0, 8.0, 0.01) var env_glow_hdr_threshold: float = 2.0
+@export_range(0.0, 2.0, 0.01) var env_glow_bloom: float = 0.10
 @export var env_glow_blend_mode_additive: bool = true
-@export var env_glow_levels: PackedFloat32Array = PackedFloat32Array([0.0, 0.65, 0.58, 0.40, 0.22, 0.12, 0.06])
-@export var debug_environment_setup_once: bool = false
+@export var env_glow_levels: PackedFloat32Array = PackedFloat32Array([0.0, 0.85, 0.55, 0.28, 0.12, 0.05, 0.02])
+@export var debug_environment_setup_once: bool = false # one-time verification print for glow/camera state
 
 # Additive blending controls for energy layers
 @export var additive_energy_blend: bool = true # legacy/global toggle
@@ -836,9 +836,13 @@ func _ensure_environment_glow() -> void:
 	_set_prop(env, "glow_bloom", env_glow_bloom)
 	_set_prop(env, "glow_blend_mode", 0 if env_glow_blend_mode_additive else 1)
 
+	var levels: PackedFloat32Array = env_glow_levels
+	if levels.size() < 7:
+		levels = PackedFloat32Array([0.0, 0.85, 0.55, 0.28, 0.12, 0.05, 0.02])
+
 	var i: int = 0
-	while i < env_glow_levels.size() and i <= 6:
-		_set_prop(env, "glow_levels/" + str(i), maxf(0.0, env_glow_levels[i]))
+	while i <= 6:
+		_set_prop(env, "glow_levels/" + str(i), clampf(levels[i], 0.0, 8.0))
 		i += 1
 
 	if clear_camera_environment_override:
