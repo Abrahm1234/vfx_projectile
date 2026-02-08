@@ -1,6 +1,6 @@
 @tool
 extends Node3D
-class_name VFXProjectile
+class_name VFXProjectileFx
 
 # Scene expectations (auto-created if missing):
 # - Head   : MeshInstance3D
@@ -820,14 +820,22 @@ func _ensure_environment_glow() -> void:
 	if viewport == null:
 		return
 
-	var world: World3D = viewport.world_3d
-	if world == null:
-		return
+	var env: Environment = null
 
-	var env: Environment = world.environment
-	if env == null:
-		env = Environment.new()
-		world.environment = env
+	var we: WorldEnvironment = viewport.find_child("WorldEnvironment", true, false) as WorldEnvironment
+	if we != null:
+		env = we.environment
+		if env == null:
+			env = Environment.new()
+			we.environment = env
+	else:
+		var world: World3D = viewport.world_3d
+		if world == null:
+			return
+		env = world.environment
+		if env == null:
+			env = Environment.new()
+			world.environment = env
 
 	_set_prop(env, "glow_enabled", true)
 	_set_prop(env, "glow_intensity", env_glow_intensity)
@@ -856,7 +864,7 @@ func _ensure_environment_glow() -> void:
 		var cam_env_state: String = "no-camera"
 		if cam != null:
 			cam_env_state = "null" if cam.environment == null else "set"
-		print("[VFXProjectile] Environment setup: env_exists=", env != null, ", glow_enabled=", env.get("glow_enabled"), ", camera_environment=", cam_env_state)
+		print("[VFXProjectileFx] Environment setup: env_exists=", env != null, ", glow_enabled=", env.get("glow_enabled"), ", camera_environment=", cam_env_state)
 
 # -----------------------------
 # Noise texture
